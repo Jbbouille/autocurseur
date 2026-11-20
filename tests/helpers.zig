@@ -13,6 +13,67 @@ pub fn dpiAware() void {
     _ = w.SetProcessDpiAwarenessContext(w.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 }
 
+/// Ce que contient un curseur couleur du jeu rouge.
+pub const RedStats = struct {
+    width: i32,
+    hot_x: u32,
+    hot_y: u32,
+    opaque_px: usize = 0,
+    red_px: usize = 0,
+    /// pixels rouges qui touchent directement un pixel transparent (trou dans le contour)
+    gaps: usize = 0,
+};
+
+fn isRed(p: u32) bool {
+    const r = (p >> 16) & 255;
+    const g = (p >> 8) & 255;
+    const b = p & 255;
+    return r > 150 and g < 100 and b < 100;
+}
+
+fn isClear(p: u32) bool {
+    return p >> 24 == 0;
+}
+
+pub fn redStats(c: w.HCURSOR) !RedStats {
+    var ii: w.ICONINFO = undefined;
+    if (w.GetIconInfo(c, &ii) == 0) return error.GetIconInfo;
+    defer _ = w.DeleteObject(ii.hbmMask);
+    const color = ii.hbmColor orelse return error.PasUnCurseurCouleur;
+    defer _ = w.DeleteObject(color);
+    var bm: w.BITMAP = undefined;
+    _ = w.GetObjectW(color, @sizeOf(w.BITMAP), &bm);
+    const width: usize = @intCast(bm.bmWidth);
+    const height: usize = @intCast(bm.bmHeight);
+    const px = try testing.allocator.alloc(u32, width * height);
+    defer testing.allocator.free(px);
+    var bi = w.bmi(bm.bmWidth, bm.bmHeight);
+    const dc = w.GetDC(null);
+    defer _ = w.ReleaseDC(null, dc);
+    if (w.GetDIBits(dc, color, 0, @intCast(height), @ptrCast(px.ptr), &bi, w.DIB_RGB_COLORS) == 0) return error.GetDIBits;
+
+    var s: RedStats = .{ .width = bm.bmWidth, .hot_x = ii.xHotspot, .hot_y = ii.yHotspot };
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const p = px[y * width + x];
+            if (p >> 24 <= 128) continue;
+            s.opaque_px += 1;
+            if (!isRed(p)) continue;
+            s.red_px += 1;
+            if ((x > 0 and isClear(px[y * width + x - 1])) or (x + 1 < width and isClear(px[y * width + x + 1])) or
+                (y > 0 and isClear(px[(y - 1) * width + x])) or (y + 1 < height and isClear(px[(y + 1) * width + x])))
+                s.gaps += 1;
+        }
+    }
+    return s;
+}
+
+/// Objets GDI et USER (curseurs compris) détenus par le processus : sert à repérer les fuites.
+pub fn guiObjects() u32 {
+    const p = w.GetCurrentProcess();
+    return w.GetGuiResources(p, w.GR_GDIOBJECTS) + w.GetGuiResources(p, w.GR_USEROBJECTS);
+}
+
 /// Ce que contient un curseur : taille, point chaud, pixels opaques et part de blancs parmi eux.
 pub const Stats = struct {
     width: i32,

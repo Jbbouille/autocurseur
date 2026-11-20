@@ -37,6 +37,8 @@ pub const COUNT = defs.len;
 
 pub var black: [COUNT]w.HCURSOR = @splat(null);
 pub var white: [COUNT]w.HCURSOR = @splat(null);
+/// jeu agrandi et rouge, affiché quand on secoue la souris (chargé seulement si l'option est active)
+pub var red: [COUNT]w.HCURSOR = @splat(null);
 /// taille (px) des jeux actuellement chargés
 pub var size: i32 = 0;
 
@@ -109,6 +111,86 @@ pub fn invert(src: w.HCURSOR) w.HCURSOR {
     }
 }
 
+/// Copie rouge de `src`, qui doit être un curseur de la version noire (corps noir,
+/// contour blanc) : corps rouge, contour blanc, voir core.reddenColorPixels et
+/// core.monoToRed. Le résultat est toujours un curseur 32 bits avec transparence.
+pub fn redden(src: w.HCURSOR) w.HCURSOR {
+    var ii: w.ICONINFO = undefined;
+    if (w.GetIconInfo(src, &ii) == 0) return null;
+    defer _ = w.DeleteObject(ii.hbmMask);
+
+    var mbm: w.BITMAP = undefined;
+    _ = w.GetObjectW(ii.hbmMask, @sizeOf(w.BITMAP), &mbm);
+    const stride: usize = @intCast(mbm.bmWidthBytes);
+    const mask_len = stride * @as(usize, @intCast(mbm.bmHeight));
+    if (mask_len > mask_buf.len) return null;
+    if (w.GetBitmapBits(ii.hbmMask, @intCast(mask_len), &mask_buf) != mask_len) return null;
+
+    var width: i32 = undefined;
+    var height: i32 = undefined;
+    var and_mask: w.HBITMAP = ii.hbmMask;
+    var own_mask: w.HBITMAP = null;
+    defer if (own_mask) |m| {
+        _ = w.DeleteObject(m);
+    };
+    if (ii.hbmColor) |color| {
+        defer _ = w.DeleteObject(color);
+        var bm: w.BITMAP = undefined;
+        _ = w.GetObjectW(color, @sizeOf(w.BITMAP), &bm);
+        width = bm.bmWidth;
+        height = bm.bmHeight;
+        const uw: usize = @intCast(width);
+        const uh: usize = @intCast(height);
+        if (uw > core.MAX_CUR or uh > core.MAX_CUR) return null;
+        var bi = w.bmi(width, height);
+        const dc = w.GetDC(null);
+        defer _ = w.ReleaseDC(null, dc);
+        if (w.GetDIBits(dc, color, 0, @intCast(uh), &px_buf, &bi, w.DIB_RGB_COLORS) == 0) return null;
+        core.reddenColorPixels(px_buf[0 .. uw * uh], uw, mask_buf[0..mask_len], stride);
+    } else {
+        // monochrome : la moitié haute du masque (ET) sert de masque au curseur couleur
+        width = mbm.bmWidth;
+        height = @divTrunc(mbm.bmHeight, 2);
+        const uw: usize = @intCast(width);
+        const uh: usize = @intCast(height);
+        if (uw > core.MAX_CUR or uh > core.MAX_CUR) return null;
+        core.monoToRed(mask_buf[0..mask_len], stride, uw, uh, px_buf[0 .. uw * uh]);
+        own_mask = w.CreateBitmap(width, height, 1, 1, &mask_buf) orelse return null;
+        and_mask = own_mask;
+    }
+    const nb = w.CreateBitmap(width, height, 1, 32, &px_buf) orelse return null;
+    defer _ = w.DeleteObject(nb);
+    var ni: w.ICONINFO = .{ .fIcon = 0, .xHotspot = ii.xHotspot, .yHotspot = ii.yHotspot, .hbmMask = and_mask, .hbmColor = nb };
+    return w.CreateIconIndirect(&ni);
+}
+
+/// Libère le jeu rouge.
+pub fn freeRed() void {
+    for (&red) |*r| {
+        if (r.*) |c| _ = w.DestroyCursor(c);
+        r.* = null;
+    }
+}
+
+/// Charge le jeu rouge, agrandi (core.bigSize) par rapport à des curseurs de `px`.
+pub fn loadRed(px: i32) void {
+    freeRed();
+    const big = core.bigSize(px);
+    const wn = w.GetWindowsDirectoryW(&windir, windir.len);
+    for (defs, 0..) |d, i| {
+        const path = core.join(&path_buf, &.{ windir[0..wn], L("\\Cursors\\"), d.file });
+        const base = w.LoadImageW(null, path.ptr, w.IMAGE_CURSOR, big, big, w.LR_LOADFROMFILE) orelse continue;
+        defer _ = w.DestroyCursor(base);
+        if (d.file_is_white) {
+            const blk = invert(base) orelse continue;
+            defer _ = w.DestroyCursor(blk);
+            red[i] = redden(blk);
+        } else {
+            red[i] = redden(base);
+        }
+    }
+}
+
 /// Libère les deux jeux.
 pub fn free() void {
     for (&black, &white) |*b, *wh| {
@@ -144,7 +226,15 @@ pub fn load(px: i32) void {
 
 /// Remplace les curseurs du système par le jeu noir ou blanc.
 pub fn apply(want_black: bool) void {
-    const set = if (want_black) &black else &white;
+    applySet(if (want_black) &black else &white);
+}
+
+/// Remplace les curseurs du système par le jeu rouge agrandi.
+pub fn applyRed() void {
+    applySet(&red);
+}
+
+fn applySet(set: *const [COUNT]w.HCURSOR) void {
     for (set, defs) |cur, d| {
         const src = cur orelse continue;
         const copy = w.CopyIcon(src) orelse continue; // SetSystemCursor détruit la copie

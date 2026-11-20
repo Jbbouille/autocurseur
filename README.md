@@ -2,84 +2,99 @@
 
 [![CI](https://github.com/Jbbouille/autocurseur/actions/workflows/ci.yml/badge.svg)](https://github.com/Jbbouille/autocurseur/actions/workflows/ci.yml)
 
-Petit utilitaire Windows écrit en Zig : le curseur devient **noir sur fond clair** et **blanc sur fond sombre**, en entier.
+**English** · [Français](README.fr.md)
 
-*A tiny Windows tray utility that switches the whole mouse pointer to black over light backgrounds and to white over dark ones. Native Zig, ~75 KB, no dynamic allocation, ~0.2 % of one CPU core.*
+A tiny Windows tray utility written in Zig: the whole mouse pointer turns **black over light backgrounds** and **white over dark ones**. Shake the mouse and the pointer grows and turns red so you can find it.
 
-## Pourquoi
+Native code, about 80 KB, no dynamic memory allocation, about 0.2 % of one CPU core.
 
-Windows propose un pointeur « inversé », mais il inverse chaque pixel séparément. Sur un fond coloré, le curseur prend des couleurs étranges. Dans Chrome ou Edge avec l'accélération graphique, il reste parfois blanc sur une page blanche, parce que l'inversion est calculée sur une couche de l'écran qui n'est pas la page.
+## Why
 
-AutoCurseur utilise des curseurs opaques, vraiment noirs ou vraiment blancs. Il choisit lequel afficher en regardant ce qu'il y a sous la souris.
+Windows has an "inverted" pointer, but it inverts each pixel separately. Over a colored background the pointer takes on odd colors. In Chrome or Edge with hardware acceleration it sometimes stays white over a white page, because the inversion is computed against a screen layer that is not the page.
 
-## Utilisation
+AutoCurseur uses opaque cursors that are really black or really white, and picks one by looking at what is under the mouse.
 
-Téléchargez `AutoCurseur.exe` dans les [releases](https://github.com/Jbbouille/autocurseur/releases) (ou compilez-le, voir plus bas) et lancez-le. Une icône ronde mi-noire mi-blanche apparaît dans la zone de notification :
+## Usage
 
-- **clic droit** :
-  - *Actif* ;
-  - *Vérifications par seconde (souris en mouvement)* : 3, 5, 10 (par défaut) ou 20 ;
-  - *Lancer au démarrage de Windows* ;
-  - *Quitter* ;
-- **double-clic** : pause ou reprise.
+Download `AutoCurseur.exe` from the [releases](https://github.com/Jbbouille/autocurseur/releases) (or build it, see below) and run it. The exe is not signed, so Windows SmartScreen may warn the first time: click *More info*, then *Run anyway*.
 
-Le registre ne sert qu'à vos réglages : l'option de démarrage, et le rythme choisi dans le menu (`HKCU\Software\AutoCurseur`, créé seulement si vous le changez). En pause ou à la fermeture, Windows recharge vos curseurs habituels. Aucun droit administrateur n'est nécessaire et il n'y a rien à installer : les formes viennent du jeu « Windows Black » fourni avec Windows.
+A round half-black, half-white icon appears in the notification area:
 
-**Ce n'est pas un service Windows**, mais un petit programme de votre session, comme une icône de la barre des tâches. Il n'agit que tant qu'il tourne :
+- **right-click**:
+  - *Active*;
+  - *Checks per second (while the mouse moves)*: 3, 5, 10 (default) or 20;
+  - *Language*: automatic (follows Windows), English or Français;
+  - *Shake to find the pointer (bigger, in red)*: on by default;
+  - *Start with Windows*;
+  - *Quit*;
+- **double-click**: pause or resume.
 
-- **pour l'arrêter** : clic droit sur l'icône, puis *Quitter*. Vos curseurs habituels reviennent aussitôt ;
-- **pour qu'il démarre tout seul** : cochez *Lancer au démarrage de Windows*. Il sera lancé à chaque ouverture de session ;
-- **s'il est arrêté de force** (Gestionnaire des tâches) : les derniers curseurs noirs ou blancs restent en place jusqu'à la prochaine ouverture de session ou au prochain lancement d'AutoCurseur, qui remet d'abord ceux de Windows.
+The registry only holds your settings: the startup option, and the choices made in the menu (`HKCU\Software\AutoCurseur`, created only when you change one). When paused or closed, Windows reloads your usual cursors. No admin rights are needed and nothing is installed: the shapes come from the "Windows Black" scheme that ships with Windows.
 
-Un service ne conviendrait pas : il tourne en dehors de votre session et ne peut ni voir votre écran ni changer votre curseur.
+**It is not a Windows service**, just a small program in your session, like a taskbar icon. It only works while it runs:
 
-## Comment la couleur est choisie
+- **to stop it**: right-click the icon, then *Quit*. Your usual cursors come back immediately;
+- **to start it automatically**: check *Start with Windows*. It then starts at every sign-in;
+- **if it is killed** (Task Manager): the last black or white cursors stay until the next sign-in or the next launch of AutoCurseur, which first puts back the Windows ones.
 
-1. L'outil lit la position de la souris, ce qui ne coûte presque rien : 10 fois par seconde par défaut, ou 3, 5 ou 20 fois selon le réglage du menu. Quand elle est immobile depuis 1 s, il ne vérifie plus que toutes les 250 ms (toutes les 333 ms au réglage 3).
-2. Il copie un carré de l'écran qui couvre le corps du curseur. Le carré fait les trois quarts de la taille du curseur, soit 48 px pour un curseur de 64 px. Il commence un peu au-dessus et à gauche de la pointe et s'étend surtout vers le bas à droite.
-3. Il calcule la **luminance moyenne** du carré, de 0 à 255, en pondérant comme l'œil : 30 % rouge, 59 % vert, 11 % bleu.
-4. Il décide avec une **hystérésis** :
-   - à partir de 150, le curseur passe en noir ;
-   - à 105 ou moins, il passe en blanc ;
-   - entre les deux, il ne change pas. Cela évite le clignotement sur les gris moyens et le long d'une frontière.
+A service would not work anyway: it runs outside your session and can neither see your screen nor change your pointer.
 
-**Avec du texte dessous**, c'est le fond qui décide, pas la lettre survolée. Les tests le vérifient sur des images dessinées en mémoire :
+## How the color is chosen
 
-| Contenu | Luminance lue | Curseur |
+1. It reads the mouse position, which costs almost nothing: 10 times per second by default, or 3, 5 or 20 times depending on the menu setting. Once the mouse has been still for 1 s, it only checks every 250 ms (every 333 ms at the 3/s setting).
+2. It copies a square of the screen that covers the body of the pointer. The square is three quarters of the pointer size, so 48 px for a 64 px pointer. It starts slightly above and left of the tip and extends mostly down and to the right.
+3. It computes the **average luminance** of the square, from 0 to 255, weighted like the eye: 30 % red, 59 % green, 11 % blue.
+4. It decides with **hysteresis**:
+   - from 150 up, the pointer turns black;
+   - at 105 or below, it turns white;
+   - in between, it does not change. This avoids flicker over mid grays and along a boundary.
+
+**With text underneath**, the background decides, not the letter under the pointer. The tests check this on images drawn in memory:
+
+| Content | Luminance read | Pointer |
 |---|---|---|
-| Texte noir sur page blanche | 181 à 255 | noir partout, aucune bascule |
-| Très gros titre en gras | 139 à 255 | noir partout, grâce à l'hystérésis |
-| Éditeur de code sombre | 30 à 50 | blanc partout |
-| Damier fin noir/blanc, gris moyen | environ 128 | ne change jamais |
+| Black text on a white page | 181 to 255 | black everywhere, never switches |
+| Very large bold heading | 139 to 255 | black everywhere, thanks to the hysteresis |
+| Dark code editor | 30 to 50 | white everywhere |
+| Fine black/white checkerboard, mid gray | about 128 | never changes |
 
-Chaque curseur a un contour de la couleur opposée, il reste donc visible même posé sur une lettre.
+Each pointer has an outline of the opposite color, so it stays visible even on top of a letter.
 
-La **taille** des curseurs est celle de la flèche que Windows affiche à ce moment-là. À 250 % d'affichage, Windows utilise 64 px, et non 32 × 2,5 = 80.
+The pointer **size** is the size of the arrow Windows is displaying at that moment. At 250 % display scaling, Windows uses 64 px, not 32 × 2.5 = 80.
 
-## Consommation
+## Shake to find the pointer
 
-Mesures faites par les tests de performance et les tests système, sur un PC portable avec un écran à 250 % :
+As on macOS, quickly moving the mouse back and forth makes the pointer twice as large and red, with a white outline. It goes back to normal 0.6 s after you stop.
+
+- **Detection**: only while the mouse moves, its position is read about every 30 ms. Four quick reversals within one second trigger it, each swing at least twice the pointer size (128 px at 250 %), horizontally or vertically. Aiming at a target and correcting an overshoot, selecting text, or sweeping slowly back and forth does not trigger it.
+- **Shape**: the red cursors are made from the black set, loaded at double size (64 → 128 px at 250 %). That size exists in the Windows files, so the outline stays sharp.
+- **Cost**: about 4 ns of computation per position read. The 17 red cursors are prepared once (about 9 ms) and are not loaded at all when the option is off.
+
+## Resource usage
+
+Measured by the performance and system tests, on a laptop with a 250 % display:
 
 | | |
 |---|---|
-| Exécutable | environ 75 Ko en ReleaseFast (58 Ko avec `-Doptimize=small`) |
-| Mémoire privée | environ 1,9 Mo |
-| Processeur, souris immobile | environ 0,15 % d'un cœur |
-| Processeur, souris en mouvement | environ 0,1 % (3/s), 0,2 % (5/s), 0,4 % (10/s), 0,8 % (20/s) d'un cœur |
-| Une lecture d'écran | environ 0,4 ms de processeur |
-| Bascule noir ↔ blanc des 17 curseurs | environ 1,2 ms |
+| Executable | about 80 KB in ReleaseFast (about 65 KB with `-Doptimize=small`) |
+| Private memory | about 1.9 MB |
+| CPU, mouse still | about 0.15 % of one core |
+| CPU, mouse moving | about 0.1 % (3/s), 0.2 % (5/s), 0.3 % (10/s), 0.7 % (20/s) of one core |
+| One screen read | about 0.3 ms of CPU |
+| Switching all 17 cursors black ↔ white | about 1.3 ms |
+| 1.5 s of shaking (screen reads included) | about 16 ms of CPU |
 
-**Aucune allocation dynamique** : tous les tampons sont des tableaux globaux de taille fixe, environ 330 Ko, prévus pour des curseurs jusqu'à 256 px. Un test refuse toute trace d'allocateur dans le code de l'application. Seuls les objets Windows (curseurs, bitmaps, fenêtre, icône) sont créés par le système.
+**No dynamic allocation**: all buffers are fixed-size global arrays, about 330 KB, sized for cursors up to 256 px. A test rejects any trace of an allocator in the application code. Only Windows objects (cursors, bitmaps, window, icon) are created by the system.
 
-## Compiler
+## Building
 
-Il faut [Zig](https://ziglang.org) 0.17.
+You need [Zig](https://ziglang.org) 0.17.
 
 ```powershell
 zig build
 ```
 
-L'exécutable est produit dans `zig-out\bin\AutoCurseur.exe`, compilé en **ReleaseFast**. Pour un exe plus petit, utilisez `zig build -Doptimize=small`. Pour l'option « Lancer au démarrage », lancez-le depuis l'endroit où il restera, car c'est ce chemin qui est enregistré.
+The executable is written to `zig-out\bin\AutoCurseur.exe`, compiled in **ReleaseFast**. For a smaller exe, use `zig build -Doptimize=small`. For the *Start with Windows* option, run it from where it will stay, since that path is what gets registered.
 
 ## Tests
 
@@ -87,69 +102,81 @@ L'exécutable est produit dans `zig-out\bin\AutoCurseur.exe`, compilé en **Rele
 zig build test
 ```
 
-Cette commande lance 75 tests, sans toucher au curseur de votre session :
+This runs 107 tests without touching your session's pointer:
 
-- **unitaires** (`src/*.zig`) : décision et hystérésis, luminance, inversion des pixels couleur et monochromes, géométrie de la zone lue, tailles, rythme de la minuterie (budgets de lectures par seconde), icône, absence d'allocation et budget de mémoire statique ;
-- **intégration** (`tests/integration.zig`) :
-  - les 17 vrais fichiers de curseurs de Windows, à 7 tailles ;
-  - inversion exacte et réversible, point chaud conservé ;
-  - texte et thèmes dessinés en mémoire ;
-  - frontière parcourue pixel par pixel, damier, couleurs vives ;
-- **performance** (`tests/perf.zig`, compilés dans le même mode que l'exe publié, ReleaseFast par défaut) : chaque mesure est affichée et comparée à un seuil environ 10 fois plus large que la valeur mesurée.
+- **unit** (`src/*.zig`): decision and hysteresis, luminance, inversion of color and monochrome pixels, red tint, shake detection (real shakes, overshoot corrections, slow back-and-forth, millisecond counter wrap-around), geometry of the area read, sizes, timer pacing (reads-per-second budgets), texts in both languages, menu identifiers, icon, no allocation and static memory budget;
+- **integration** (`tests/integration.zig`):
+  - the 17 real Windows cursor files, at 7 sizes;
+  - exact and reversible inversion, hotspot kept;
+  - red set: every cursor twice as large, the arrow identical to the black one with only its black pixels turned red, an outline with no gap;
+  - no leaked Windows objects after 20 reloads;
+  - text and themes drawn in memory;
+  - a boundary scanned pixel by pixel, checkerboard, vivid colors;
+- **performance** (`tests/perf.zig`, compiled in the same mode as the released exe, ReleaseFast by default): each measurement is printed and compared with a limit about 10 times higher than the measured value.
 
 ```powershell
 zig build test-system
 ```
 
-Ces tests système changent réellement le curseur pendant une quinzaine de secondes, puis le restaurent. Quittez AutoCurseur avant de les lancer. Ils vérifient :
-- l'application puis la restauration des curseurs, et leur taille ;
-- des curseurs d'une autre taille laissés par un ancien lancement, qui ne doivent pas être repris ;
-- le réglage « vérifications par seconde » envoyé par le menu, puis mémorisé ; l'état d'origine du registre est remis ensuite ;
-- 200 bascules successives ;
-- le vrai exécutable : consommation sur 10 s, mémoire, instance unique, fermeture propre et retour du curseur d'origine.
+These 10 system tests really change the pointer for about 30 seconds, move the mouse, then restore everything. Quit AutoCurseur before running them. They check:
 
-## Intégration continue
+- applying then restoring the cursors, and their size;
+- cursors of another size left by an earlier run, which must not be reused;
+- the reads-per-second, language and shake settings sent through the menu, then saved; your registry settings are put back afterwards;
+- 200 switches in a row;
+- a real shake of the mouse: the displayed arrow becomes the red one at double size, then goes back to normal; a plain sweep across the screen triggers nothing, nor does a shake with the option off;
+- the real executable: usage over 10 s, memory, single instance, clean exit and original pointer back.
 
-À chaque push et pull request, [GitHub Actions](.github/workflows/ci.yml) installe Zig sur une machine Windows. Il lance `zig build test` et `zig build test-system`, compile l'exe en ReleaseFast et le met à disposition comme artefact.
+## Continuous integration
 
-Pour publier une version, poussez un tag `v*` (par exemple `git tag v1.0.0` puis `git push origin v1.0.0`). Une fois les tests passés, la pipeline crée la release GitHub avec l'exe testé.
+On every push and pull request, [GitHub Actions](.github/workflows/ci.yml) installs Zig on a Windows machine. It runs `zig build test` and `zig build test-system`, builds the exe in ReleaseFast and makes it available as an artifact.
 
-## Structure
+To publish a version, push a `v*` tag (for example `git tag v0.1.0` then `git push origin v0.1.0`). Once the tests pass, the pipeline creates the GitHub release with the tested exe.
+
+## Layout
 
 ```
-src/core.zig      logique pure, sans Windows (décision, luminance, inversion, minuterie)
-src/cursors.zig   chargement et génération des jeux noir et blanc, application au système
-src/sampler.zig   lecture de l'écran sous la souris
-src/icon.zig      icône de la zone de notification
-src/settings.zig  réglages mémorisés (HKCU\Software\AutoCurseur)
-src/main.zig      fenêtre cachée, menu, minuterie : relie le tout
-src/win32.zig     déclarations de l'API Windows utilisées
-src/lib.zig       point d'entrée des tests unitaires
-tests/            intégration, performance, système
+src/core.zig      pure logic, no Windows (decision, luminance, inversion, red tint, shake, timer)
+src/cursors.zig   loading and building the black, white and red sets, applying them to the system
+src/sampler.zig   reading the screen under the mouse
+src/icon.zig      notification area icon
+src/i18n.zig      menu texts in English and French
+src/settings.zig  saved settings (HKCU\Software\AutoCurseur)
+src/main.zig      hidden window, menu, timers: ties everything together
+src/win32.zig     declarations of the Windows API functions used
+src/lib.zig       entry point of the unit tests
+tests/            integration, performance, system
 ```
 
-## Réglages
+## Settings
 
-| Où | Constante | Défaut | Rôle |
+| Where | Name | Default | Role |
 |---|---|---|---|
-| `core.zig` | `Thresholds.to_black` | 150 | luminance à partir de laquelle le curseur passe en noir |
-| `core.zig` | `Thresholds.to_white` | 105 | luminance en dessous de laquelle il repasse en blanc |
-| menu | vérifications par seconde | 10 | 3, 5, 10 ou 20 quand la souris bouge (`core.RATES`) |
-| `core.zig` | `STILL_MS` | 1000 | délai sans mouvement avant le mode lent |
-| `core.zig` | `IDLE_MS` | 250 | période en mode lent (jamais plus fréquente qu'en mouvement) |
-| `core.zig` | `MAX_CUR` | 256 | taille max d'un curseur, qui dimensionne les tampons statiques |
+| `core.zig` | `Thresholds.to_black` | 150 | luminance from which the pointer turns black |
+| `core.zig` | `Thresholds.to_white` | 105 | luminance below which it turns white again |
+| menu | checks per second | 10 | 3, 5, 10 or 20 while the mouse moves (`core.RATES`) |
+| menu | language | automatic | follows the Windows display language: French for any French variant, English otherwise |
+| menu | shake to find | on | bigger red pointer when the mouse is shaken |
+| `core.zig` | `SHAKE_TURNS`, `SHAKE_WINDOW_MS` | 4, 1000 | reversals needed, and the time they must fit in |
+| `core.zig` | `SHAKE_HOLD_MS` | 600 | how long the pointer stays big after the last reversal |
+| `core.zig` | `STILL_MS` | 1000 | time without movement before slow mode |
+| `core.zig` | `IDLE_MS` | 250 | period in slow mode (never more often than while moving) |
+| `core.zig` | `MAX_CUR` | 256 | maximum cursor size, which sizes the static buffers |
 
-## Limites
+The menu choices are stored as `DWORD` values in `HKCU\Software\AutoCurseur`: `LecturesParSeconde`, `Langue` (0 automatic, 1 English, 2 French) and `SecouerPourRetrouver` (0 or 1).
 
-- Windows 10 ou 11 uniquement.
-- Les curseurs animés (attente) sont remplacés par leur version fixe du jeu « Windows Black ».
-- La lecture de l'écran ne voit pas les vidéos protégées (DRM), qui apparaissent noires : le curseur y sera blanc.
+## Limitations
 
-## Licence
+- Windows 10 or 11 only.
+- Animated cursors (busy) are replaced by their static version from the "Windows Black" scheme.
+- Screen capture cannot see protected (DRM) videos, which appear black: the pointer will be white over them.
+- The executable is not signed (see SmartScreen above).
+
+## License
 
 [MIT](LICENSE).
 
 ## Alternatives
 
-- Le pointeur « inversé » de Windows (Paramètres → Accessibilité → Pointeur de la souris) : rien à installer, mais inversion pixel par pixel, avec les défauts décrits plus haut.
-- [DynamicCursor](https://github.com/ItsProfessional/DynamicCursor) : script PowerShell, archivé depuis 2023. Il compare 5 pixels sans hystérésis, capture tout l'écran en boucle continue, modifie le registre et demande les droits administrateur.
+- The Windows "inverted" pointer (Settings → Accessibility → Mouse pointer and touch): nothing to install, but per-pixel inversion, with the drawbacks described above.
+- [DynamicCursor](https://github.com/ItsProfessional/DynamicCursor): a PowerShell script, archived since 2023. It compares 5 pixels without hysteresis, captures the whole screen in a continuous loop, modifies the registry and requires admin rights.

@@ -3,21 +3,42 @@
 
 const std = @import("std");
 const core = @import("core.zig");
+const i18n = @import("i18n.zig");
 const w = @import("win32.zig");
 const L = std.unicode.utf8ToUtf16LeStringLiteral;
 
 pub const KEY = L("Software\\AutoCurseur");
 pub const RATE_VALUE = L("LecturesParSeconde");
+pub const LANG_VALUE = L("Langue");
+pub const SHAKE_VALUE = L("SecouerPourRetrouver");
+
+/// Identifiant de l'entrée « secouer pour retrouver » du menu (les autres entrées fixes
+/// sont dans main.zig, toutes en dessous de 100).
+pub const MENU_SHAKE = 4;
 
 /// Identifiants des entrées « lectures par seconde » du menu : RATE_MENU_BASE + indice dans core.RATES.
 pub const RATE_MENU_BASE = 100;
+/// Identifiants des entrées « langue » du menu : LANG_MENU_BASE + valeur de i18n.Choice.
+pub const LANG_MENU_BASE = 200;
+
+/// Valeur brute enregistrée sous `name`, ou null si aucune.
+pub fn readDword(name: [*:0]const u16) ?u32 {
+    var v: u32 = 0;
+    var cb: u32 = @sizeOf(u32);
+    if (w.RegGetValueW(w.HKCU, KEY, name, w.RRF_RT_REG_DWORD, null, &v, &cb) != 0) return null;
+    return v;
+}
+
+pub fn writeDword(name: [*:0]const u16, v: u32) void {
+    var k: w.HKEY = null;
+    if (w.RegCreateKeyExW(w.HKCU, KEY, 0, null, 0, w.KEY_SET_VALUE, null, &k, null) != 0) return;
+    defer _ = w.RegCloseKey(k);
+    _ = w.RegSetValueExW(k, name, 0, w.REG_DWORD, &v, @sizeOf(u32));
+}
 
 /// Valeur brute enregistrée, ou null si aucune.
 pub fn readRate() ?u32 {
-    var v: u32 = 0;
-    var cb: u32 = @sizeOf(u32);
-    if (w.RegGetValueW(w.HKCU, KEY, RATE_VALUE, w.RRF_RT_REG_DWORD, null, &v, &cb) != 0) return null;
-    return v;
+    return readDword(RATE_VALUE);
 }
 
 /// Rythme à utiliser : celui enregistré s'il est valide, sinon le défaut.
@@ -26,11 +47,25 @@ pub fn loadRate() u32 {
 }
 
 pub fn saveRate(rate: u32) void {
-    var k: w.HKEY = null;
-    if (w.RegCreateKeyExW(w.HKCU, KEY, 0, null, 0, w.KEY_SET_VALUE, null, &k, null) != 0) return;
-    defer _ = w.RegCloseKey(k);
-    const v: u32 = core.validRate(rate);
-    _ = w.RegSetValueExW(k, RATE_VALUE, 0, w.REG_DWORD, &v, @sizeOf(u32));
+    writeDword(RATE_VALUE, core.validRate(rate));
+}
+
+/// Langue choisie : celle enregistrée si elle est valide, sinon automatique.
+pub fn loadLang() i18n.Choice {
+    return i18n.Choice.fromInt(readDword(LANG_VALUE) orelse 0) orelse .auto;
+}
+
+pub fn saveLang(c: i18n.Choice) void {
+    writeDword(LANG_VALUE, @backingInt(c));
+}
+
+/// « Secouer pour retrouver » : actif sauf si l'utilisateur l'a désactivé.
+pub fn loadShake() bool {
+    return (readDword(SHAKE_VALUE) orelse 1) != 0;
+}
+
+pub fn saveShake(on: bool) void {
+    writeDword(SHAKE_VALUE, @intFromBool(on));
 }
 
 /// Efface tous les réglages (supprime la clé) : retour aux valeurs par défaut, sans trace.
@@ -38,10 +73,16 @@ pub fn reset() void {
     _ = w.RegDeleteKeyW(w.HKCU, KEY);
 }
 
-/// Indice dans core.RATES de l'entrée de menu `id`, ou null si ce n'en est pas une.
+/// Rythme de l'entrée de menu `id`, ou null si ce n'en est pas une.
 pub fn rateFromMenuId(id: usize) ?u32 {
     if (id < RATE_MENU_BASE or id >= RATE_MENU_BASE + core.RATES.len) return null;
     return core.RATES[id - RATE_MENU_BASE];
+}
+
+/// Langue de l'entrée de menu `id`, ou null si ce n'en est pas une.
+pub fn langFromMenuId(id: usize) ?i18n.Choice {
+    if (id < LANG_MENU_BASE or id >= LANG_MENU_BASE + i18n.CHOICES.len) return null;
+    return i18n.Choice.fromInt(@intCast(id - LANG_MENU_BASE));
 }
 
 test "rateFromMenuId : seules les entrées du sous-menu donnent un rythme" {
@@ -50,4 +91,22 @@ test "rateFromMenuId : seules les entrées du sous-menu donnent un rythme" {
     try std.testing.expectEqual(@as(?u32, null), rateFromMenuId(RATE_MENU_BASE + core.RATES.len));
     try std.testing.expectEqual(@as(?u32, null), rateFromMenuId(1));
     try std.testing.expectEqual(@as(?u32, null), rateFromMenuId(0));
+}
+
+test "langFromMenuId : seules les entrées du sous-menu donnent une langue" {
+    try std.testing.expectEqual(@as(?i18n.Choice, .auto), langFromMenuId(LANG_MENU_BASE));
+    try std.testing.expectEqual(@as(?i18n.Choice, .en), langFromMenuId(LANG_MENU_BASE + 1));
+    try std.testing.expectEqual(@as(?i18n.Choice, .fr), langFromMenuId(LANG_MENU_BASE + 2));
+    try std.testing.expectEqual(@as(?i18n.Choice, null), langFromMenuId(LANG_MENU_BASE + i18n.CHOICES.len));
+    try std.testing.expectEqual(@as(?i18n.Choice, null), langFromMenuId(LANG_MENU_BASE - 1));
+    try std.testing.expectEqual(@as(?i18n.Choice, null), langFromMenuId(RATE_MENU_BASE));
+}
+
+test "identifiants de menu : les plages ne se chevauchent pas" {
+    // les entrées fixes du menu (Actif, Démarrage, Quitter) sont en dessous de 100
+    try std.testing.expect(RATE_MENU_BASE + core.RATES.len <= LANG_MENU_BASE);
+    for (0..RATE_MENU_BASE + 1000) |id| {
+        const both = rateFromMenuId(id) != null and langFromMenuId(id) != null;
+        try std.testing.expect(!both);
+    }
 }

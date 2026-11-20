@@ -64,4 +64,9 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$env:GITHUB_REF_NAME" dist/AutoCurseur.exe --title "AutoCurseur $env:GITHUB_REF_NAME" --generate-notes
+        run: |
+          $notes = Join-Path $env:RUNNER_TEMP "notes.md"
+          $sha = (Get-FileHash dist/AutoCurseur.exe -Algorithm SHA256).Hash
+          Get-Content .github/release-notes.md -Raw -Encoding utf8 | Out-File $notes -Encoding utf8
+          "`nSHA-256 ``AutoCurseur.exe`` : ``$sha```n" | Out-File $notes -Append -Encoding utf8
+          gh release create "$env:GITHUB_REF_NAME" dist/AutoCurseur.exe --title "AutoCurseur $env:GITHUB_REF_NAME" --notes-file $notes --generate-notes

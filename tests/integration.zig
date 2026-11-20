@@ -370,3 +370,88 @@ test "redimensionner la zone lue plusieurs fois reste cohérent" {
         try testing.expectEqual(@as(?u32, 255), sampler.sampleFrom(c.dc, .{ .x = 0, .y = 0 }));
     }
 }
+
+// ---------------------------------------------------------------------
+// Jeu rouge agrandi (secouer pour retrouver)
+// ---------------------------------------------------------------------
+
+test "jeu rouge : les 17 curseurs, deux fois plus grands, avec du rouge, à plusieurs tailles" {
+    h.dpiAware();
+    defer cursors.freeRed();
+    for ([_]i32{ 32, 48, 64, 96, 128 }) |px| {
+        cursors.loadRed(px);
+        for (cursors.red, 0..) |c, i| {
+            const cur = c orelse {
+                std.debug.print("  curseur rouge manquant : n° {d} à {d} px\n", .{ i, px });
+                return error.CurseurManquant;
+            };
+            const s = try h.redStats(cur);
+            try testing.expectEqual(core.bigSize(px), s.width);
+            try testing.expect(s.red_px > 0);
+            try testing.expect(s.opaque_px > s.red_px); // il reste un contour
+        }
+    }
+}
+
+test "jeu rouge : la flèche est la noire agrandie, corps rouge, contour blanc sans trou" {
+    h.dpiAware();
+    defer cursors.free();
+    defer cursors.freeRed();
+    for ([_]i32{ 32, 48, 64 }) |px| {
+        cursors.loadRed(px);
+        cursors.load(core.bigSize(px)); // version noire chargée directement à la grande taille
+        const r = try h.redStats(cursors.red[0].?);
+        const b = try h.stats(cursors.black[0].?);
+        try testing.expectEqual(b.width, r.width);
+        try testing.expectEqual(b.hot_x, r.hot_x);
+        try testing.expectEqual(b.hot_y, r.hot_y);
+        try testing.expectEqual(b.opaque_px, r.opaque_px); // même dessin
+        try testing.expectEqual(b.opaque_px - b.white_px, r.red_px); // le noir, et lui seul, devient rouge
+        try testing.expectEqual(@as(usize, 0), r.gaps);
+    }
+}
+
+test "jeu rouge : le point chaud suit l'agrandissement" {
+    h.dpiAware();
+    defer cursors.free();
+    defer cursors.freeRed();
+    cursors.load(32);
+    cursors.loadRed(32);
+    const n = try h.stats(cursors.black[0].?);
+    const r = try h.redStats(cursors.red[0].?);
+    try testing.expect(@abs(@as(i64, r.hot_x) - 2 * @as(i64, n.hot_x)) <= 1);
+    try testing.expect(@abs(@as(i64, r.hot_y) - 2 * @as(i64, n.hot_y)) <= 1);
+}
+
+test "jeu rouge : la main (curseur couleur avec transparence) devient rouge" {
+    h.dpiAware();
+    defer cursors.freeRed();
+    cursors.loadRed(32);
+    const hand = for (cursors.defs, 0..) |d, i| {
+        if (d.id == 32649) break cursors.red[i].?;
+    } else return error.MainIntrouvable;
+    const s = try h.redStats(hand);
+    try testing.expect(s.red_px * 3 > s.opaque_px); // corps en bonne partie rouge
+    try testing.expect(s.opaque_px < @as(usize, @intCast(s.width * s.width)) / 2); // fond transparent
+}
+
+test "jeu rouge : charger et libérer 20 fois ne fait fuir aucun objet Windows" {
+    h.dpiAware();
+    cursors.loadRed(48);
+    cursors.freeRed();
+    const before = h.guiObjects();
+    for (0..20) |_| cursors.loadRed(48);
+    cursors.freeRed();
+    try testing.expectEqual(before, h.guiObjects());
+    for (cursors.red) |c| try testing.expect(c == null);
+}
+
+test "jeux noir et blanc : charger et libérer 20 fois ne fait fuir aucun objet Windows" {
+    h.dpiAware();
+    cursors.load(48);
+    cursors.free();
+    const before = h.guiObjects();
+    for (0..20) |_| cursors.load(48);
+    cursors.free();
+    try testing.expectEqual(before, h.guiObjects());
+}

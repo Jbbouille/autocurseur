@@ -125,3 +125,32 @@ test "perf : lecture réelle de l'écran, coût processeur par lecture" {
     h.report("budget estimé souris immobile (% d'un cœur)", idle_pct, "%", 1);
     try testing.expect(idle_pct < 1);
 }
+
+test "perf : détection de secousse, par lecture de position" {
+    var s = core.Shake.init(64);
+    const n = 1_000_000;
+    var events: usize = 0;
+    const t = h.Timer.start();
+    for (0..n) |i| {
+        // va-et-vient en dents de scie de 540 px, 10 lectures par aller
+        const k: i32 = @intCast(i % 20);
+        const x: i32 = if (k < 10) k * 60 else (20 - k) * 60;
+        if (s.feed(@truncate(i * core.SHAKE_TICK_MS), .{ .x = x, .y = 0 }) != .none) events += 1;
+    }
+    const r = t.perIteration(n);
+    std.mem.doNotOptimizeAway(events);
+    h.report("détection de secousse, par lecture", r.wall_us * 1000, "ns", 500);
+    try testing.expect(r.wall_us * 1000 < 500);
+}
+
+test "perf : chargement du jeu rouge agrandi (17 curseurs)" {
+    h.dpiAware();
+    defer cursors.freeRed();
+    cursors.loadRed(64);
+    const n = 5;
+    const t = h.Timer.start();
+    for (0..n) |_| cursors.loadRed(64);
+    const r = t.perIteration(n);
+    h.report("chargement des 17 curseurs rouges à 128 px", r.wall_us / 1000, "ms", 500);
+    try testing.expect(r.wall_us < 500_000);
+}

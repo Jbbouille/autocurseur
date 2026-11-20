@@ -5,6 +5,7 @@
 //! - `invertColorPixels` / `invertMonoMask` : fabrication de la version inversée d'un curseur
 //! - `sampleOrigin`: position de la zone lue à l'écran
 //! - `Ticker`      : rythme de la minuterie (rapide quand la souris bouge, lent sinon)
+//! - `Shake`       : détection d'une souris secouée, et version rouge agrandie des curseurs
 
 const std = @import("std");
 const testing = std.testing;
@@ -567,6 +568,336 @@ test "Ticker : budget souris en mouvement, exactement le rythme choisi" {
         try testing.expect(s.samples >= 10 * r and s.samples <= 10 * r + 1);
         try testing.expectEqual(s.samples, s.wakeups);
     }
+}
+
+// =====================================================================
+// Secouer pour retrouver la souris : curseur agrandi et rouge
+// =====================================================================
+
+/// Rouge du curseur agrandi (0xRRGGBB), assez soutenu pour se voir sur fond clair
+/// comme sur fond sombre (le contour reste blanc).
+pub const RED: u32 = 0xE81123;
+/// Facteur d'agrandissement : 2 tombe sur une taille présente dans les fichiers de
+/// Windows (32 -> 64, 48 -> 96, 64 -> 128), donc un contour net.
+pub const SHAKE_SCALE = 2;
+/// Période de lecture de la position pendant que la souris bouge (ms).
+pub const SHAKE_TICK_MS = 30;
+/// Nombre de demi-tours rapides qui déclenchent l'agrandissement...
+pub const SHAKE_TURNS = 4;
+/// ...s'ils tiennent dans cette durée (ms).
+pub const SHAKE_WINDOW_MS = 1000;
+/// Durée pendant laquelle le curseur reste agrandi après le dernier demi-tour (ms).
+pub const SHAKE_HOLD_MS = 600;
+
+/// Taille du curseur agrandi pour un curseur normal de `px`.
+pub fn bigSize(px: i32) i32 {
+    return @min(px * SHAKE_SCALE, MAX_CUR);
+}
+
+/// Teinte d'un pixel gris de luminance `l` : rouge pour le noir, blanc pour le blanc,
+/// dégradé entre les deux (bords adoucis des curseurs avec transparence).
+pub fn redTint(l: u32) u32 {
+    const k = @min(l, 255);
+    var out: u32 = 0;
+    inline for (.{ 16, 8, 0 }) |shift| {
+        const c = (RED >> shift) & 255;
+        out |= (c + (255 - c) * k / 255) << shift;
+    }
+    return out;
+}
+
+/// Version rouge d'un curseur 32 bits de la version noire (corps noir, contour blanc) :
+/// les pixels gris visibles prennent la teinte rouge, les couleurs franches sont gardées.
+/// Sans transparence d'origine, l'alpha est fabriqué à partir du masque ET.
+pub fn reddenColorPixels(px: []u32, w: usize, mask: []const u8, mask_stride: usize) void {
+    const has_alpha = for (px) |c| {
+        if (c >> 24 != 0) break true;
+    } else false;
+    for (px, 0..) |*p, i| {
+        const c = p.*;
+        const visible = if (has_alpha) c >> 24 != 0 else maskBit(mask, mask_stride, i % w, i / w) == 0;
+        if (!visible) {
+            p.* = 0;
+            continue;
+        }
+        const a: u32 = if (has_alpha) c & 0xFF000000 else 0xFF000000;
+        p.* = a | if (isGray(c)) redTint(luma(c)) else c & 0x00FFFFFF;
+    }
+}
+
+/// Version rouge 32 bits d'un curseur monochrome de la version noire (masque ET + OU
+/// exclusif de hauteur 2h). Opaque noir -> rouge, opaque blanc -> blanc ; les pixels
+/// transparents et « inverse l'écran » deviennent transparents.
+pub fn monoToRed(mask: []const u8, stride: usize, w: usize, h: usize, out: []u32) void {
+    std.debug.assert(out.len >= w * h and mask.len >= stride * h * 2);
+    for (0..h) |y| {
+        for (0..w) |x| {
+            out[y * w + x] = if (maskBit(mask, stride, x, y) == 1)
+                0
+            else if (maskBit(mask, stride, x, y + h) == 1)
+                0xFFFFFFFF
+            else
+                0xFF000000 | RED;
+        }
+    }
+}
+
+/// Mouvement de va-et-vient sur un axe : repère les demi-tours d'amplitude suffisante.
+const ShakeAxis = struct {
+    dir: i32 = 0, // sens de l'aller en cours : -1, 0 (pas encore), +1
+    start: i32 = 0, // point de départ de l'aller en cours
+    ext: i32 = 0, // point le plus loin atteint dans ce sens
+    turns: [SHAKE_TURNS]u32 = @splat(0), // instants des derniers demi-tours amples
+    n: u32 = 0, // nombre de demi-tours amples enregistrés (plafonné)
+    next: usize = 0,
+
+    fn reset(a: *ShakeAxis, v: i32) void {
+        a.* = .{ .start = v, .ext = v };
+    }
+
+    /// Vrai si un demi-tour d'au moins `min_seg` px vient d'avoir lieu.
+    fn feed(a: *ShakeAxis, v: i32, t: u32, min_seg: i32, jitter: i32) bool {
+        if (a.dir == 0) {
+            if (@abs(v - a.start) > jitter) {
+                a.dir = if (v > a.start) 1 else -1;
+                a.ext = v;
+            }
+            return false;
+        }
+        if ((v - a.ext) * a.dir > 0) { // on continue dans le même sens
+            a.ext = v;
+            return false;
+        }
+        if ((a.ext - v) * a.dir <= jitter) return false; // petit tremblement : ignoré
+        const amp: i32 = @intCast(@abs(a.ext - a.start));
+        a.start = a.ext;
+        a.ext = v;
+        a.dir = -a.dir;
+        if (amp < min_seg) return false;
+        a.turns[a.next] = t;
+        a.next = (a.next + 1) % SHAKE_TURNS;
+        a.n = @min(a.n + 1, SHAKE_TURNS);
+        return true;
+    }
+
+    /// Vrai si les SHAKE_TURNS derniers demi-tours tiennent dans SHAKE_WINDOW_MS.
+    fn shaking(a: ShakeAxis, t: u32) bool {
+        if (a.n < SHAKE_TURNS) return false;
+        const oldest = a.turns[a.next]; // le plus ancien, puisque le tampon est plein
+        return t -% oldest <= SHAKE_WINDOW_MS;
+    }
+};
+
+/// Détecte qu'on secoue la souris pour la retrouver : plusieurs allers-retours rapides
+/// et amples, horizontaux ou verticaux. Reçoit la position environ toutes les 30 ms.
+pub const Shake = struct {
+    min_seg: i32,
+    jitter: i32,
+    x: ShakeAxis = .{},
+    y: ShakeAxis = .{},
+    started: bool = false,
+    big: bool = false,
+    until: u32 = 0,
+
+    pub const Event = enum { none, start, stop };
+
+    /// L'amplitude minimale d'un aller est le double de la taille du curseur : elle suit
+    /// l'agrandissement de l'écran, et un petit ajustement de visée ne compte pas.
+    pub fn init(cursor_px: i32) Shake {
+        const seg = @max(32, cursor_px * 2);
+        return .{ .min_seg = seg, .jitter = @max(2, @divTrunc(seg, 8)) };
+    }
+
+    /// À appeler à chaque lecture de la position, `t` en millisecondes (GetTickCount :
+    /// le passage par zéro au bout de 49 jours est géré).
+    pub fn feed(s: *Shake, t: u32, p: Point) Event {
+        if (!s.started) {
+            s.started = true;
+            s.x.reset(p.x);
+            s.y.reset(p.y);
+            return .none;
+        }
+        const tx = s.x.feed(p.x, t, s.min_seg, s.jitter);
+        const ty = s.y.feed(p.y, t, s.min_seg, s.jitter);
+        if (tx or ty) {
+            if (s.big) {
+                s.until = t +% SHAKE_HOLD_MS;
+            } else if (s.x.shaking(t) or s.y.shaking(t)) {
+                s.big = true;
+                s.until = t +% SHAKE_HOLD_MS;
+                return .start;
+            }
+        }
+        if (s.big and @as(i32, @bitCast(t -% s.until)) >= 0) {
+            s.big = false;
+            s.x.reset(p.x);
+            s.y.reset(p.y);
+            return .stop;
+        }
+        return .none;
+    }
+
+    /// Arrête la détection (souris immobile, pause) ; vrai si le curseur était agrandi.
+    pub fn stop(s: *Shake) bool {
+        const was = s.big;
+        s.* = .{ .min_seg = s.min_seg, .jitter = s.jitter };
+        return was;
+    }
+};
+
+/// Simule une souris qui fait des allers-retours d'amplitude `amp` à `hz` allers-retours
+/// par seconde sur l'axe x (ou y), lue toutes les SHAKE_TICK_MS. Renvoie l'instant (ms,
+/// relatif à `t0`) du déclenchement, ou null.
+fn shakeAt(s: *Shake, t0: u32, duration_ms: u32, amp: i32, hz: f32, vertical: bool) ?u32 {
+    var t: u32 = 0;
+    while (t <= duration_ms) : (t += SHAKE_TICK_MS) {
+        const phase = @as(f32, @floatFromInt(t)) / 1000 * hz * 2 * std.math.pi;
+        const d: i32 = @intFromFloat(@as(f32, @floatFromInt(amp)) / 2 * @sin(phase));
+        const p: Point = if (vertical) .{ .x = 800, .y = 500 + d } else .{ .x = 800 + d, .y = 500 };
+        if (s.feed(t0 +% t, p) == .start) return t;
+    }
+    return null;
+}
+
+test "bigSize : double, plafonné à la taille des tampons" {
+    try testing.expectEqual(@as(i32, 64), bigSize(32));
+    try testing.expectEqual(@as(i32, 128), bigSize(64));
+    try testing.expectEqual(@as(i32, MAX_CUR), bigSize(200));
+}
+
+test "redTint : noir -> rouge, blanc -> blanc, dégradé entre les deux" {
+    try testing.expectEqual(RED, redTint(0));
+    try testing.expectEqual(@as(u32, 0xFFFFFF), redTint(255));
+    try testing.expectEqual(@as(u32, 0xFFFFFF), redTint(1000));
+    const mid = redTint(128);
+    try testing.expect(luma(mid) > luma(RED) and luma(mid) < 255);
+    try testing.expect((mid >> 16) & 255 >= (mid >> 8) & 255); // reste rougeâtre
+}
+
+test "reddenColorPixels : gris -> teinte rouge, couleurs et transparence gardées" {
+    var px = [_]u32{ 0xFF000000, 0xFFFFFFFF, 0x00000000, 0xFF2060E0, 0x80000000 };
+    reddenColorPixels(&px, 5, &.{0}, 1);
+    try testing.expectEqual(@as(u32, 0xFF000000 | RED), px[0]); // corps noir -> rouge
+    try testing.expectEqual(@as(u32, 0xFFFFFFFF), px[1]); // contour blanc gardé
+    try testing.expectEqual(@as(u32, 0), px[2]); // transparent
+    try testing.expectEqual(@as(u32, 0xFF2060E0), px[3]); // bleu (cercle d'attente) gardé
+    try testing.expectEqual(@as(u32, 0x80000000 | RED), px[4]); // bord adouci : alpha gardé
+}
+
+test "reddenColorPixels : sans alpha, le masque ET décide et l'alpha est fabriqué" {
+    var px = [_]u32{ 0x000000, 0xFFFFFF, 0x000000, 0x123456 };
+    reddenColorPixels(&px, 4, &.{0b0010_0000}, 1); // 3e pixel transparent
+    try testing.expectEqual(@as(u32, 0xFF000000 | RED), px[0]);
+    try testing.expectEqual(@as(u32, 0xFFFFFFFF), px[1]);
+    try testing.expectEqual(@as(u32, 0), px[2]);
+    try testing.expectEqual(@as(u32, 0xFF123456), px[3]);
+}
+
+test "monoToRed : noir -> rouge, blanc -> blanc, transparent et « inverse l'écran » -> transparent" {
+    // 4 pixels sur une ligne, stride 2 octets ; ET puis OU exclusif
+    const mask = [_]u8{ 0b0011_0000, 0, 0b0101_0000, 0 };
+    var out: [4]u32 = undefined;
+    monoToRed(&mask, 2, 4, 1, &out);
+    try testing.expectEqual(@as(u32, 0xFF000000 | RED), out[0]); // ET 0, OUX 0 : noir
+    try testing.expectEqual(@as(u32, 0xFFFFFFFF), out[1]); // ET 0, OUX 1 : blanc
+    try testing.expectEqual(@as(u32, 0), out[2]); // ET 1, OUX 0 : transparent
+    try testing.expectEqual(@as(u32, 0), out[3]); // ET 1, OUX 1 : inverse l'écran
+}
+
+test "Shake : seuils proportionnels à la taille du curseur" {
+    const s32 = Shake.init(32);
+    const s64 = Shake.init(64);
+    try testing.expectEqual(@as(i32, 64), s32.min_seg);
+    try testing.expectEqual(@as(i32, 128), s64.min_seg);
+    try testing.expect(s64.jitter > s32.jitter);
+    try testing.expectEqual(@as(i32, 32), Shake.init(0).min_seg);
+}
+
+test "Shake : secouer franchement déclenche en moins d'une seconde, à l'horizontale comme à la verticale" {
+    for ([_]bool{ false, true }) |vertical| {
+        for ([_]f32{ 2.5, 3, 4, 6 }) |hz| {
+            var s = Shake.init(32);
+            const t = shakeAt(&s, 0, 2000, 400, hz, vertical) orelse return error.PasDeclenche;
+            try testing.expect(t < 1000);
+            try testing.expect(s.big);
+        }
+    }
+}
+
+test "Shake : va-et-vient trop petit ou trop lent : rien" {
+    var small = Shake.init(64); // seuil 128 px
+    try testing.expectEqual(@as(?u32, null), shakeAt(&small, 0, 3000, 100, 4, false));
+    var slow = Shake.init(32);
+    try testing.expectEqual(@as(?u32, null), shakeAt(&slow, 0, 5000, 600, 1, false));
+}
+
+test "Shake : déplacements ordinaires, visée avec dépassement et correction : rien" {
+    var s = Shake.init(32);
+    var t: u32 = 0;
+    const path = [_]Point{
+        .{ .x = 0, .y = 0 },     .{ .x = 200, .y = 50 },  .{ .x = 600, .y = 150 }, .{ .x = 900, .y = 220 },
+        .{ .x = 960, .y = 230 }, .{ .x = 930, .y = 228 }, .{ .x = 920, .y = 226 }, .{ .x = 924, .y = 226 },
+        .{ .x = 700, .y = 400 }, .{ .x = 300, .y = 700 }, .{ .x = 100, .y = 760 }, .{ .x = 140, .y = 750 },
+    };
+    for (path) |p| {
+        try testing.expectEqual(Shake.Event.none, s.feed(t, p));
+        t += SHAKE_TICK_MS;
+    }
+}
+
+test "Shake : sélectionner du texte en allant et venant lentement : rien" {
+    var s = Shake.init(32);
+    // trois allers-retours de 300 px, chacun en 1,2 s
+    try testing.expectEqual(@as(?u32, null), shakeAt(&s, 0, 3600, 300, 1.0 / 1.2, false));
+}
+
+test "Shake : reste agrandi tant qu'on secoue, revient ensuite" {
+    var s = Shake.init(32);
+    const t_start = shakeAt(&s, 0, 2000, 400, 4, false) orelse return error.PasDeclenche;
+    // on continue à secouer pendant 2 s : aucun retour
+    var t: u32 = t_start + SHAKE_TICK_MS;
+    var stopped_at: ?u32 = null;
+    const end = t + 2000;
+    while (t < end) : (t += SHAKE_TICK_MS) {
+        const phase = @as(f32, @floatFromInt(t)) / 1000 * 4 * 2 * std.math.pi;
+        const x: i32 = 800 + @as(i32, @intFromFloat(200 * @sin(phase)));
+        if (s.feed(t, .{ .x = x, .y = 500 }) == .stop) stopped_at = t;
+    }
+    try testing.expectEqual(@as(?u32, null), stopped_at);
+    // souris arrêtée : retour au bout d'environ SHAKE_HOLD_MS
+    while (t < end + 2000) : (t += SHAKE_TICK_MS) {
+        if (s.feed(t, .{ .x = 800, .y = 500 }) == .stop) {
+            stopped_at = t;
+            break;
+        }
+    }
+    const d = (stopped_at orelse return error.PasRevenu) - end;
+    try testing.expect(d <= SHAKE_HOLD_MS + 2 * SHAKE_TICK_MS);
+    try testing.expect(!s.big);
+}
+
+test "Shake : après un retour, il faut secouer à nouveau pour redéclencher" {
+    var s = Shake.init(32);
+    _ = shakeAt(&s, 0, 2000, 400, 4, false) orelse return error.PasDeclenche;
+    var t: u32 = 2000;
+    while (s.big) : (t += SHAKE_TICK_MS) _ = s.feed(t, .{ .x = 0, .y = 0 });
+    try testing.expectEqual(Shake.Event.none, s.feed(t + 30, .{ .x = 400, .y = 0 }));
+    try testing.expect(shakeAt(&s, t + 60, 2000, 400, 4, false) != null);
+}
+
+test "Shake : le passage par zéro du compteur de millisecondes ne gêne pas" {
+    var s = Shake.init(32);
+    const t0: u32 = std.math.maxInt(u32) - 500; // déborde en cours de route
+    _ = shakeAt(&s, t0, 2000, 400, 4, false) orelse return error.PasDeclenche;
+}
+
+test "Shake : stop() dit si le curseur était agrandi et remet tout à zéro" {
+    var s = Shake.init(32);
+    try testing.expect(!s.stop());
+    _ = shakeAt(&s, 0, 2000, 400, 4, false) orelse return error.PasDeclenche;
+    try testing.expect(s.stop());
+    try testing.expect(!s.big and !s.started);
+    try testing.expectEqual(@as(i32, 64), s.min_seg);
 }
 
 // =====================================================================

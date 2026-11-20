@@ -7,8 +7,32 @@ const options = @import("build_options");
 const h = @import("helpers.zig");
 const w = app.win32;
 const cursors = app.cursors;
+const core = app.core;
+const settings = app.settings;
 const testing = std.testing;
 const L = h.L;
+
+/// Réglages de l'utilisateur, relevés avant un test et remis à l'identique après.
+const Saved = struct {
+    rate: ?u32,
+    lang: ?u32,
+    shake: ?u32,
+
+    fn take() Saved {
+        return .{
+            .rate = settings.readDword(settings.RATE_VALUE),
+            .lang = settings.readDword(settings.LANG_VALUE),
+            .shake = settings.readDword(settings.SHAKE_VALUE),
+        };
+    }
+
+    fn put(v: Saved) void {
+        settings.reset();
+        if (v.rate) |x| settings.writeDword(settings.RATE_VALUE, x);
+        if (v.lang) |x| settings.writeDword(settings.LANG_VALUE, x);
+        if (v.shake) |x| settings.writeDword(settings.SHAKE_VALUE, x);
+    }
+};
 
 fn systemArrow() !h.Stats {
     return h.stats(w.LoadCursorW(null, w.IDC_ARROW));
@@ -95,8 +119,8 @@ test "système : des curseurs d'une autre taille laissés par un ancien lancemen
 
 test "système : le réglage « vérifications par seconde » du menu est appliqué et mémorisé" {
     try skipIfRunning();
-    const saved = app.settings.readRate(); // on remet l'état d'origine à la fin
-    defer if (saved) |v| app.settings.saveRate(v) else app.settings.reset();
+    const saved = Saved.take(); // on remet l'état d'origine à la fin
+    defer saved.put();
     defer cursors.restore();
 
     app.settings.reset();
@@ -174,4 +198,170 @@ test "système : l'exécutable bascule, consomme peu, reste unique et se ferme p
     _ = w.PostMessageW(hwnd, w.WM_CLOSE, 0, 0);
     try testing.expect(p.exitedWithin(5000));
     try testing.expect((try systemArrow()).sameImage(before));
+}
+
+test "système : la langue choisie dans le menu est appliquée et mémorisée" {
+    try skipIfRunning();
+    const saved = Saved.take();
+    defer saved.put();
+    defer cursors.restore();
+
+    app.settings.reset();
+    try testing.expectEqual(app.i18n.Choice.auto, app.settings.loadLang());
+
+    const p = try Proc.start();
+    defer p.kill();
+    w.Sleep(1000);
+    const hwnd = w.FindWindowW(L("AutoCurseur"), null) orelse return error.FenetreIntrouvable;
+    for ([_]app.i18n.Choice{ .fr, .en, .auto }) |c| {
+        _ = w.PostMessageW(hwnd, w.WM_COMMAND, app.settings.LANG_MENU_BASE + @backingInt(c), 0);
+        w.Sleep(200);
+        try testing.expectEqual(c, app.settings.loadLang());
+    }
+    // une entrée de menu inconnue ne change rien
+    _ = w.PostMessageW(hwnd, w.WM_COMMAND, app.settings.LANG_MENU_BASE + app.i18n.CHOICES.len, 0);
+    w.Sleep(200);
+    try testing.expectEqual(app.i18n.Choice.auto, app.settings.loadLang());
+
+    _ = w.PostMessageW(hwnd, w.WM_CLOSE, 0, 0);
+    try testing.expect(p.exitedWithin(5000));
+}
+
+test "système : « secouer pour retrouver » se désactive et se réactive depuis le menu" {
+    try skipIfRunning();
+    const saved = Saved.take();
+    defer saved.put();
+    defer cursors.restore();
+
+    app.settings.reset();
+    try testing.expect(app.settings.loadShake()); // actif par défaut
+
+    const p = try Proc.start();
+    defer p.kill();
+    w.Sleep(1000);
+    const hwnd = w.FindWindowW(L("AutoCurseur"), null) orelse return error.FenetreIntrouvable;
+    _ = w.PostMessageW(hwnd, w.WM_COMMAND, app.settings.MENU_SHAKE, 0);
+    w.Sleep(300);
+    try testing.expect(!app.settings.loadShake());
+    _ = w.PostMessageW(hwnd, w.WM_COMMAND, app.settings.MENU_SHAKE, 0);
+    w.Sleep(300);
+    try testing.expect(app.settings.loadShake());
+
+    _ = w.PostMessageW(hwnd, w.WM_CLOSE, 0, 0);
+    try testing.expect(p.exitedWithin(5000));
+}
+
+/// Déplace la souris en va-et-vient horizontal (`hz` allers-retours par seconde,
+/// amplitude totale `amp` px autour de `c`) pendant `ms` millisecondes.
+fn shakeMouse(c: core.Point, amp: i32, hz: f32, ms: u32) void {
+    var t: u32 = 0;
+    while (t < ms) : (t += 10) {
+        const phase = @as(f32, @floatFromInt(t)) / 1000 * hz * 2 * std.math.pi;
+        const dx: i32 = @intFromFloat(@as(f32, @floatFromInt(amp)) / 2 * @sin(phase));
+        _ = w.SetCursorPos(c.x + dx, c.y);
+        w.Sleep(10);
+    }
+}
+
+test "système : secouer la souris affiche le curseur rouge agrandi, qui disparaît ensuite" {
+    try skipIfRunning();
+    const saved = Saved.take();
+    defer saved.put();
+    app.settings.reset(); // option active par défaut
+
+    // la souris peut-elle être déplacée ici ? (pas toujours sur une machine sans session ouverte)
+    var orig: core.Point = .{};
+    _ = w.GetCursorPos(&orig);
+    defer _ = w.SetCursorPos(orig.x, orig.y);
+    const c: core.Point = .{ .x = @divTrunc(w.GetSystemMetrics(w.SM_CXSCREEN), 2), .y = @divTrunc(w.GetSystemMetrics(w.SM_CYSCREEN), 2) };
+    _ = w.SetCursorPos(c.x + 7, c.y);
+    var now_pos: core.Point = .{};
+    _ = w.GetCursorPos(&now_pos);
+    if (now_pos.x != c.x + 7 or now_pos.y != c.y) {
+        std.debug.print("  la souris ne peut pas être déplacée dans cette session : test ignoré\n", .{});
+        return error.SkipZigTest;
+    }
+
+    const before = try systemArrow();
+    const size = cursors.systemSize();
+    defer cursors.free();
+    cursors.load(size);
+    const black = try h.stats(cursors.black[0]);
+    const white = try h.stats(cursors.white[0]);
+
+    const p = try Proc.start();
+    defer p.kill();
+    defer cursors.restore();
+    w.Sleep(1500);
+    const hwnd = w.FindWindowW(L("AutoCurseur"), null) orelse return error.FenetreIntrouvable;
+
+    // 1. va-et-vient franc (4 par seconde, 6 fois la taille du curseur) pendant 1,5 s
+    const amp = @min(6 * size, w.GetSystemMetrics(w.SM_CXSCREEN) - 40);
+    const per_us = h.cyclesPerUs();
+    const cyc0 = h.processCycles(p.pi.hProcess);
+    shakeMouse(c, amp, 4, 1500);
+    const cpu_ms = @as(f64, @floatFromInt(h.processCycles(p.pi.hProcess) - cyc0)) / per_us / 1000;
+    const big = h.redStats(w.LoadCursorW(null, w.IDC_ARROW)) catch |e| {
+        std.debug.print("  la flèche affichée n'est pas le curseur rouge ({s})\n", .{@errorName(e)});
+        return e;
+    };
+    h.report("taille de la flèche en secouant", @floatFromInt(big.width), "px", @floatFromInt(core.bigSize(size)));
+    h.report("processeur pendant 1,5 s de secousse", cpu_ms, "ms", 150);
+    try testing.expectEqual(core.bigSize(size), big.width);
+    try testing.expect(big.red_px > 0);
+    try testing.expect(cpu_ms < 150); // moins de 10 % d'un cœur, lectures d'écran comprises
+
+    // 2. souris arrêtée : le curseur normal revient
+    _ = w.SetCursorPos(c.x, c.y);
+    w.Sleep(1500);
+    const back = try systemArrow();
+    try testing.expect(back.sameImage(black) or back.sameImage(white));
+
+    // 3. un simple déplacement ne déclenche rien
+    var x: i32 = c.x - @divTrunc(amp, 2);
+    while (x < c.x + @divTrunc(amp, 2)) : (x += 8) {
+        _ = w.SetCursorPos(x, c.y);
+        w.Sleep(10);
+    }
+    const moved = try systemArrow();
+    try testing.expect(moved.sameImage(black) or moved.sameImage(white));
+
+    _ = w.PostMessageW(hwnd, w.WM_CLOSE, 0, 0);
+    try testing.expect(p.exitedWithin(5000));
+    try testing.expect((try systemArrow()).sameImage(before));
+}
+
+test "système : option désactivée, secouer ne change rien" {
+    try skipIfRunning();
+    const saved = Saved.take();
+    defer saved.put();
+    app.settings.reset();
+    app.settings.saveShake(false);
+
+    var orig: core.Point = .{};
+    _ = w.GetCursorPos(&orig);
+    defer _ = w.SetCursorPos(orig.x, orig.y);
+    const c: core.Point = .{ .x = @divTrunc(w.GetSystemMetrics(w.SM_CXSCREEN), 2), .y = @divTrunc(w.GetSystemMetrics(w.SM_CYSCREEN), 2) };
+    _ = w.SetCursorPos(c.x + 7, c.y);
+    var now_pos: core.Point = .{};
+    _ = w.GetCursorPos(&now_pos);
+    if (now_pos.x != c.x + 7) return error.SkipZigTest;
+
+    const size = cursors.systemSize();
+    defer cursors.free();
+    cursors.load(size);
+    const black = try h.stats(cursors.black[0]);
+    const white = try h.stats(cursors.white[0]);
+
+    const p = try Proc.start();
+    defer p.kill();
+    defer cursors.restore();
+    w.Sleep(1500);
+    shakeMouse(c, @min(6 * size, w.GetSystemMetrics(w.SM_CXSCREEN) - 40), 4, 1500);
+    const now = try systemArrow();
+    try testing.expect(now.sameImage(black) or now.sameImage(white));
+
+    const hwnd = w.FindWindowW(L("AutoCurseur"), null) orelse return error.FenetreIntrouvable;
+    _ = w.PostMessageW(hwnd, w.WM_CLOSE, 0, 0);
+    try testing.expect(p.exitedWithin(5000));
 }
