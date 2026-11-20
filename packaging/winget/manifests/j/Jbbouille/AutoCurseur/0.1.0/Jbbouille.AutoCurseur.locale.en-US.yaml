@@ -1,0 +1,31 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.28.0.schema.json
+
+PackageIdentifier: Jbbouille.AutoCurseur
+PackageVersion: 0.1.0
+PackageLocale: en-US
+Publisher: jbbouille
+PublisherUrl: https://github.com/Jbbouille
+PublisherSupportUrl: https://github.com/Jbbouille/autocurseur/issues
+Author: jbbouille
+PackageName: AutoCurseur
+PackageUrl: https://github.com/Jbbouille/autocurseur
+License: MIT
+LicenseUrl: https://github.com/Jbbouille/autocurseur/blob/main/LICENSE
+Copyright: Copyright (c) 2026 jbbouille
+ShortDescription: Turns the whole mouse pointer black over light backgrounds and white over dark ones. Shake the mouse to find it.
+Description: |-
+  AutoCurseur is a tiny tray utility that switches the whole Windows mouse pointer to black over light backgrounds and to white over dark ones. It reads the average luminance of the screen area under the pointer, with hysteresis so the pointer does not flicker over mid grays or along a boundary. Unlike the built-in inverted pointer, the pointer always stays fully black or fully white, even in browsers with hardware acceleration.
+  Shaking the mouse quickly makes the pointer twice as large and red so you can find it; this can be turned off in the menu.
+  It needs no admin rights, uses the "Windows Black" cursor shapes that ship with Windows, and only stores its settings in HKCU\Software\AutoCurseur. Native code written in Zig, no dynamic memory allocation, about 0.2 % of one CPU core.
+Moniker: autocurseur
+Tags:
+- accessibility
+- contrast
+- cursor
+- mouse
+- pointer
+- tray
+- visibility
+ReleaseNotesUrl: https://github.com/Jbbouille/autocurseur/releases/tag/v0.1.0
+ManifestType: defaultLocale
+ManifestVersion: 1.28.0

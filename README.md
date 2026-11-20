@@ -131,7 +131,7 @@ These 10 system tests really change the pointer for about 30 seconds, move the m
 
 On every push and pull request, [GitHub Actions](.github/workflows/ci.yml) installs Zig on a Windows machine. It runs `zig build test` and `zig build test-system`, builds the exe in ReleaseFast and makes it available as an artifact.
 
-To publish a version, push a `v*` tag (for example `git tag v0.1.0` then `git push origin v0.1.0`). Once the tests pass, the pipeline creates the GitHub release with the tested exe.
+To publish a version, push a `v*` tag (for example `git tag v0.1.0` then `git push origin v0.1.0`). Once the tests pass, the pipeline creates the GitHub release with the tested exe, then submits the new version to winget (see [packaging/winget](packaging/winget/README.md)).
 
 ## Layout
 
@@ -146,6 +146,7 @@ src/main.zig      hidden window, menu, timers: ties everything together
 src/win32.zig     declarations of the Windows API functions used
 src/lib.zig       entry point of the unit tests
 tests/            integration, performance, system
+packaging/winget/ winget manifests
 ```
 
 ## Settings

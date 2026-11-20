@@ -131,7 +131,7 @@ Ces 10 tests système changent réellement le curseur pendant une trentaine de s
 
 À chaque push et pull request, [GitHub Actions](.github/workflows/ci.yml) installe Zig sur une machine Windows. Il lance `zig build test` et `zig build test-system`, compile l'exe en ReleaseFast et le met à disposition comme artefact.
 
-Pour publier une version, poussez un tag `v*` (par exemple `git tag v0.1.0` puis `git push origin v0.1.0`). Une fois les tests passés, la pipeline crée la release GitHub avec l'exe testé.
+Pour publier une version, poussez un tag `v*` (par exemple `git tag v0.1.0` puis `git push origin v0.1.0`). Une fois les tests passés, la pipeline crée la release GitHub avec l'exe testé, puis propose la nouvelle version à winget (voir [packaging/winget](packaging/winget/README.md)).
 
 ## Structure
 
@@ -146,6 +146,7 @@ src/main.zig      fenêtre cachée, menu, minuteries : relie le tout
 src/win32.zig     déclarations de l'API Windows utilisées
 src/lib.zig       point d'entrée des tests unitaires
 tests/            intégration, performance, système
+packaging/winget/ manifestes winget
 ```
 
 ## Réglages

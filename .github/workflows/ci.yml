@@ -51,6 +51,11 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
+    env:
+      # jeton GitHub (classic, portée public_repo) du compte qui propose les mises à jour
+      # à microsoft/winget-pkgs ; sans ce secret, l'étape winget est sautée
+      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+      KOMAC_VERSION: 2.17.2
     steps:
       - uses: actions/checkout@v4
 
@@ -70,3 +75,16 @@ jobs:
           Get-Content .github/release-notes.md -Raw -Encoding utf8 | Out-File $notes -Encoding utf8
           "`nSHA-256 ``AutoCurseur.exe`` : ``$sha```n" | Out-File $notes -Append -Encoding utf8
           gh release create "$env:GITHUB_REF_NAME" dist/AutoCurseur.exe --title "AutoCurseur $env:GITHUB_REF_NAME" --notes-file $notes --generate-notes
+
+      - name: Proposer la nouvelle version à winget
+        if: env.WINGET_TOKEN != ''
+        continue-on-error: true # la release est déjà publiée ; un souci côté winget ne doit pas la marquer en échec
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          $komac = Join-Path $env:RUNNER_TEMP "komac.exe"
+          Invoke-WebRequest "https://github.com/russellbanks/Komac/releases/download/v$env:KOMAC_VERSION/komac-$env:KOMAC_VERSION-x86_64-pc-windows-msvc.exe" -OutFile $komac
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:GITHUB_REF_NAME/AutoCurseur.exe"
+          & $komac update Jbbouille.AutoCurseur --version $version --urls $url --submit

@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.locale.1.28.0.schema.json
+
+PackageIdentifier: Jbbouille.AutoCurseur
+PackageVersion: 0.1.0
+PackageLocale: fr-FR
+Publisher: jbbouille
+PublisherUrl: https://github.com/Jbbouille
+PublisherSupportUrl: https://github.com/Jbbouille/autocurseur/issues
+Author: jbbouille
+PackageName: AutoCurseur
+PackageUrl: https://github.com/Jbbouille/autocurseur
+License: MIT
+LicenseUrl: https://github.com/Jbbouille/autocurseur/blob/main/LICENSE
+Copyright: Copyright (c) 2026 jbbouille
+ShortDescription: Curseur entièrement noir sur fond clair, blanc sur fond sombre. Secouez la souris pour le retrouver.
+Description: |-
+  AutoCurseur est un petit utilitaire de la zone de notification qui rend tout le curseur de Windows noir sur fond clair et blanc sur fond sombre. Il lit la luminance moyenne de la zone de l'écran sous le curseur, avec une hystérésis pour éviter le clignotement sur les gris moyens et le long d'une frontière. Contrairement au pointeur inversé de Windows, le curseur reste toujours entièrement noir ou entièrement blanc, y compris dans les navigateurs avec accélération graphique.
+  Secouer rapidement la souris rend le curseur deux fois plus grand et rouge pour le retrouver ; l'option se désactive dans le menu.
+  Aucun droit administrateur n'est nécessaire. Les formes viennent du jeu « Windows Black » fourni avec Windows, et seuls les réglages sont enregistrés, dans HKCU\Software\AutoCurseur. Code natif écrit en Zig, sans allocation dynamique, environ 0,2 % d'un cœur de processeur.
+Tags:
+- accessibilite
+- contraste
+- curseur
+- pointeur
+- souris
+ReleaseNotesUrl: https://github.com/Jbbouille/autocurseur/releases/tag/v0.1.0
+ManifestType: locale
+ManifestVersion: 1.28.0
