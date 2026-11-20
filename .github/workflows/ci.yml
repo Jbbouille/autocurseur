@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  ZIG_VERSION: 0.17.1
+
+jobs:
+  build-test:
+    name: Build et tests (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer Zig ${{ env.ZIG_VERSION }}
+        shell: pwsh
+        run: |
+          $v = $env:ZIG_VERSION
+          $zip = Join-Path $env:RUNNER_TEMP "zig.zip"
+          Invoke-WebRequest "https://ziglang.org/download/$v/zig-x86_64-windows-$v.zip" -OutFile $zip
+          Expand-Archive $zip -DestinationPath $env:RUNNER_TEMP
+          Join-Path $env:RUNNER_TEMP "zig-x86_64-windows-$v" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - name: Version de Zig
+        run: zig version
+
+      - name: Tests unitaires, d'intégration et de performance
+        run: zig build test --summary all
+
+      - name: Tests système (curseur réel et exécutable)
+        run: zig build test-system --summary all
+
+      - name: Compilation de l'exécutable (ReleaseFast)
+        run: zig build --summary all
+
+      - name: Exécutable en artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoCurseur
+          path: zig-out/bin/AutoCurseur.exe
+
+  release:
+    name: Release GitHub
+    needs: build-test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Récupérer l'exécutable testé
+        uses: actions/download-artifact@v4
+        with:
+          name: AutoCurseur
+          path: dist
+
+      - name: Publier la release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$env:GITHUB_REF_NAME" dist/AutoCurseur.exe --title "AutoCurseur $env:GITHUB_REF_NAME" --generate-notes
