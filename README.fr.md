@@ -6,7 +6,7 @@
 
 Petit utilitaire Windows écrit en Zig : le curseur devient **noir sur fond clair** et **blanc sur fond sombre**, en entier. Quand on secoue la souris, il grossit et devient rouge pour qu'on le retrouve.
 
-Code natif, environ 80 Ko, aucune allocation dynamique, environ 0,2 % d'un cœur de processeur.
+Code natif, environ 100 Ko, aucune allocation dynamique, environ 0,2 % d'un cœur de processeur.
 
 ## Pourquoi
 
@@ -29,7 +29,7 @@ Une icône ronde mi-noire mi-blanche apparaît dans la zone de notification :
   - *Quitter* ;
 - **double-clic** : pause ou reprise.
 
-Le registre ne sert qu'à vos réglages : l'option de démarrage, et les choix faits dans le menu (`HKCU\Software\AutoCurseur`, créé seulement si vous en changez un). En pause ou à la fermeture, Windows recharge vos curseurs habituels. Aucun droit administrateur n'est nécessaire et il n'y a rien à installer : les formes viennent du jeu « Windows Black » fourni avec Windows.
+Le registre ne sert qu'à vos réglages : l'option de démarrage, et les choix faits dans le menu (`HKCU\Software\AutoCurseur`, créé seulement si vous en changez un). En pause ou à la fermeture, Windows recharge vos curseurs habituels. Aucun droit administrateur n'est nécessaire et il n'y a rien à installer : les formes viennent des curseurs fournis avec Windows (voir *Style des curseurs* plus bas). AutoCurseur écrit une fois leurs versions noire, blanche et rouge manquantes dans `%LOCALAPPDATA%\AutoCurseur\cursors` (34 fichiers, environ 4 Mo ; voir *Plusieurs écrans* plus bas).
 
 **Ce n'est pas un service Windows**, mais un petit programme de votre session, comme une icône de la barre des tâches. Il n'agit que tant qu'il tourne :
 
@@ -48,6 +48,7 @@ Un service ne conviendrait pas : il tourne en dehors de votre session et ne peut
    - à partir de 150, le curseur passe en noir ;
    - à 105 ou moins, il passe en blanc ;
    - entre les deux, il ne change pas. Cela évite le clignotement sur les gris moyens et le long d'une frontière.
+5. Il change la couleur **du seul pointeur affiché**. Windows a 17 pointeurs (flèche, sélection de texte, main des liens, flèches de redimensionnement…) ; AutoCurseur retient la couleur de chacun, et Windows le prévient chaque fois que la forme du pointeur change : la nouvelle forme prend aussitôt la bonne couleur (en bien moins d'un centième de seconde). Les vérifications ci-dessus regardent aussi le pointeur affiché, au cas où un avis se perdrait.
 
 **Avec du texte dessous**, c'est le fond qui décide, pas la lettre survolée. Les tests le vérifient sur des images dessinées en mémoire :
 
@@ -60,15 +61,45 @@ Un service ne conviendrait pas : il tourne en dehors de votre session et ne peut
 
 Chaque curseur a un contour de la couleur opposée, il reste donc visible même posé sur une lettre.
 
+## Style des curseurs
+
+Les curseurs ont la forme des curseurs blancs habituels de Windows (« Windows Aero », aux bords adoucis). En noir, AutoCurseur utilise leur négatif exact : seuls les pixels noirs, blancs et gris sont inversés, le rouge de *indisponible* reste donc rouge. Trois sortes de curseurs gardent les formes du jeu « Windows Black » fourni avec Windows :
+
+- la sélection de texte et la précision : le style blanc n'a pas de fichier pour elles (Windows utilise alors des curseurs qui inversent l'écran, justement ce qu'AutoCurseur évite) ;
+- les deux curseurs d'attente, animés dans le style blanc : AutoCurseur les affiche fixes.
+
+La flèche « Windows Black », utilisée jusqu'à la version 0.1.0, avait une queue plus longue et des bords en escalier, et quand elle laissait la place à la sélection de texte, elle laissait une trace visible à l'écran. La flèche du style blanc, en noir, n'en laisse pas.
+
 La **taille** des curseurs est celle de la flèche que Windows affiche à ce moment-là. À 250 % d'affichage, Windows utilise 64 px, et non 32 × 2,5 = 80.
+
+## Plusieurs écrans
+
+Quand deux écrans n'ont pas le même agrandissement (par exemple 150 % et 250 %), Windows veut un curseur d'une taille différente sur chacun (48 et 64 px). Un curseur fabriqué en mémoire n'a qu'une taille : Windows l'étire sur l'autre écran, et le contour devient irrégulier.
+
+AutoCurseur écrit donc ses curseurs dans de vrais fichiers `.cur`, dans `%LOCALAPPDATA%\AutoCurseur\cursors`, en gardant toutes les tailles des fichiers de Windows (32, 48, 64, 96 et 128 px) : le négatif noir des curseurs du style blanc, la version blanche des quatre curseurs « Windows Black », et la version rouge de tous. Les autres versions sont les fichiers de Windows eux-mêmes, utilisés tels quels. Les fichiers laissés par une version précédente sont supprimés quand les nouveaux sont écrits. Windows choisit alors, écran par écran, l'image dessinée à la bonne taille, exactement comme pour ses propres curseurs. Les fichiers ne sont écrits que s'ils manquent ou ne sont plus à jour.
+
+## Pointeur agrandi (Accessibilité)
+
+Quand on agrandit le pointeur dans *Paramètres → Accessibilité → Pointeur de la souris et interaction tactile*, Windows 11 n'utilise plus ses images classiques : il dessine ses curseurs à partir de dessins vectoriels (`C:\Windows\Cursors\*.svg`), une fois en 240 × 240 px, et les réduit à la taille affichée. AutoCurseur fait de même, son pointeur a donc exactement la même forme moderne :
+
+- les 17 dessins sont rendus avec Direct2D en 240 × 240, corps noir et contour blanc, puis retournés (les dessins sont rangés à l'envers) ; les versions blanche et rouge en sont tirées ;
+- comparé aux images que Windows produit lui-même (`%LOCALAPPDATA%\Microsoft\Windows\Cursors\*_eoa.cur`) : 8 curseurs sur 17 sont identiques au pixel près, les autres diffèrent de quelques pixels de bord (moins de 0,4 %), et tous les points chauds sont les mêmes ;
+- ce travail n'a lieu qu'une fois le pointeur agrandi (environ 0,3 s, une fois par session) ; Direct2D n'est chargé que pour lui et déchargé aussitôt (0,4 Mo gardés) ;
+- en taille 1, Windows utilise ses images classiques, AutoCurseur aussi ; sans ces dessins (Windows 10), AutoCurseur garde les images classiques à toutes les tailles.
+
+Quand on fait glisser le curseur « Taille », Windows recharge ses propres curseurs après sa notification, sans en envoyer d'autre. AutoCurseur attend que ça se calme et remet les siens 0,5 s, 1,5 s et 3 s après la dernière notification.
+
+Aux très grandes tailles, le curseur rouge ne double plus au-delà de 255 px à l'écran : au-delà, Windows dessine le pointeur lui-même et charger un jeu rouge lui prend jusqu'à une seconde. Un pointeur déjà énorme devient seulement rouge.
+
+Les très grandes tailles coûtent cher à Windows lui-même. Charger un curseur depuis son fichier lui prend alors environ 5 ms, car il en prépare une version géante (384 px à 150 %, 640 px à 250 %), même pour ses propres curseurs. Recharger les 17 curseurs à chaque changement de couleur coûterait environ 90 ms ; comme AutoCurseur ne recharge que celui qui est affiché (voir *Comment la couleur est choisie*), un changement coûte environ 10 ms (mesuré : 40 changements en 20 s d'allers-retours entre une zone sombre et une zone claire coûtent 0,6 s de processeur au lieu de 3,8 s). Au-delà de 255 px à l'écran, Windows dessine aussi le pointeur lui-même dans l'image de l'écran, et les lectures de l'écran peuvent devenir bien plus lentes (jusqu'à 300 à 500 ms dans certaines de nos mesures, 17 ms dans d'autres). C'est pourquoi AutoCurseur lit l'écran sur un fil à part : son fil principal (menu, minuteries, détection de la secousse, messages de Windows) n'attend jamais une lecture. Le fil de lecture dort tant qu'on ne lui demande rien, et si une lecture est en cours, seule la dernière position demandée est gardée. Il coûte 36 Ko de mémoire et 12 µs par demande (0,012 % d'un cœur à 10 lectures par seconde).
 
 ## Secouer pour retrouver le curseur
 
 Comme sur macOS, un va-et-vient rapide de la souris rend le curseur deux fois plus grand et rouge, avec un contour blanc. Il redevient normal 0,6 s après la fin de la secousse.
 
-- **Détection** : seulement pendant que la souris bouge, sa position est lue environ toutes les 30 ms. Il faut 4 demi-tours rapides en moins d'une seconde, chaque aller faisant au moins deux fois la taille du curseur (128 px à 250 %), à l'horizontale ou à la verticale. Viser une cible et corriger un dépassement, sélectionner du texte ou aller et venir lentement ne déclenche rien.
-- **Forme** : les curseurs rouges sont fabriqués à partir du jeu noir chargé en taille double (64 → 128 px à 250 %). Cette taille existe dans les fichiers de Windows, le contour reste donc net.
-- **Coût** : environ 4 ns de calcul par lecture de position. Les 17 curseurs rouges sont préparés une fois (environ 9 ms). Ils ne sont pas chargés du tout quand l'option est désactivée.
+- **Détection** : seulement pendant que la souris bouge, sa position est lue environ toutes les 30 ms. Il faut deux allers-retours et demi d'affilée (5 demi-tours) en moins d'une seconde, chaque aller faisant au moins trois fois la taille du curseur (144 px pour un curseur de 48), à l'horizontale ou à la verticale ; un aller plus court remet le compte à zéro. Viser une cible et corriger un dépassement, sélectionner du texte, un va-et-vient vif mais court, ou aller et venir lentement ne déclenche rien.
+- **Forme** : les curseurs rouges sont fabriqués à partir du jeu noir et affichés en taille double (48 → 96 px à 150 %, 64 → 128 px à 250 %). Ces tailles existent dans les fichiers, le contour reste donc net. Avec un pointeur agrandi, le curseur rouge reste sous 255 px à l'écran (voir plus haut).
+- **Coût** : environ 4 ns de calcul par lecture de position. Les fichiers rouges sont écrits une fois (environ 30 µs chacun), et pas du tout quand l'option est désactivée.
 
 ## Consommation
 
@@ -76,15 +107,18 @@ Mesures faites par les tests de performance et les tests système, sur un PC por
 
 | | |
 |---|---|
-| Exécutable | environ 80 Ko en ReleaseFast (environ 65 Ko avec `-Doptimize=small`) |
-| Mémoire privée | environ 1,9 Mo |
+| Exécutable | environ 98 Ko en ReleaseFast |
+| Mémoire privée | environ 2 Mo |
+| Fichiers écrits une fois | 34 curseurs classiques, environ 4 Mo, vérifiés en 13 ms environ au démarrage ; avec un pointeur agrandi, 51 curseurs vectoriels (5 Mo) dessinés en 0,3 s environ |
 | Processeur, souris immobile | environ 0,15 % d'un cœur |
 | Processeur, souris en mouvement | environ 0,1 % (3/s), 0,2 % (5/s), 0,3 % (10/s), 0,7 % (20/s) d'un cœur |
 | Une lecture d'écran | environ 0,3 ms de processeur |
-| Bascule noir ↔ blanc des 17 curseurs | environ 1,3 ms |
-| 1,5 s de secousse (lectures d'écran comprises) | environ 16 ms de processeur |
+| Changement noir ↔ blanc (seul le pointeur affiché, relu depuis son fichier) | environ 0,8 ms (environ 10 ms avec le plus grand pointeur) |
+| Recoloration d'une forme de pointeur qui apparaît (main des liens…) | moins de 1 ms après l'avis de Windows |
+| 2 s de secousse (lectures d'écran comprises) | environ 20 à 40 ms de processeur |
+| Attente la plus longue d'une réponse d'AutoCurseur pendant que la souris bouge | moins de 16 ms (lectures d'écran sur un fil à part) |
 
-**Aucune allocation dynamique** : tous les tampons sont des tableaux globaux de taille fixe, environ 330 Ko, prévus pour des curseurs jusqu'à 256 px. Un test refuse toute trace d'allocateur dans le code de l'application. Seuls les objets Windows (curseurs, bitmaps, fenêtre, icône) sont créés par le système.
+**Aucune allocation dynamique** : tous les tampons sont des tableaux globaux de taille fixe, environ 470 Ko (surtout les tampons de 144 Ko et 236 Ko qui servent à lire et écrire les fichiers de curseurs ; le plus gros fichier écrit, un curseur rouge de 240 × 240, fait 233 Ko). Direct2D, quand il sert, fait ses propres allocations et est déchargé aussitôt. Un test refuse toute trace d'allocateur dans le code de l'application. Seuls les objets Windows (curseurs, bitmaps, fenêtre, icône) sont créés par le système.
 
 ## Compiler
 
@@ -102,14 +136,21 @@ L'exécutable est produit dans `zig-out\bin\AutoCurseur.exe`, compilé en **Rele
 zig build test
 ```
 
-Cette commande lance 107 tests, sans toucher au curseur de votre session :
+Cette commande lance 147 tests, sans toucher au curseur de votre session :
 
-- **unitaires** (`src/*.zig`) : décision et hystérésis, luminance, inversion des pixels couleur et monochromes, teinte rouge, détection de secousse (vraies secousses, corrections de visée, va-et-vient lents, passage par zéro du compteur de millisecondes), géométrie de la zone lue, tailles, rythme de la minuterie (budgets de lectures par seconde), textes dans les deux langues, identifiants du menu, icône, absence d'allocation et budget de mémoire statique ;
+- **unitaires** (`src/*.zig`) : décision et hystérésis, luminance, inversion des pixels couleur et monochromes, teinte rouge, détection de secousse (vraies secousses, corrections de visée, va-et-vient vifs mais courts ou lents, aller trop court qui interrompt la série, passage par zéro du compteur de millisecondes), géométrie de la zone lue, tailles, rythme de la minuterie (budgets de lectures par seconde), textes dans les deux langues, identifiants du menu, icône, absence d'allocation et budget de mémoire statique ;
+  - fichiers `.cur` (`src/curfile.zig`) : lecture, refus des images PNG, compressées ou tronquées, versions inversée et rouge, double inversion qui redonne l'original, alignement sur 4 octets, tampon trop petit, fichiers d'une seule image 1 bit et 32 bits ;
+  - curseurs vectoriels (`src/svgcur.zig`) : remplacement des couleurs, conversion en 1 bit (tout pixel touché est visible), couleurs non prémultipliées, points chauds ;
 - **intégration** (`tests/integration.zig`) :
   - les 17 vrais fichiers de curseurs de Windows, à 7 tailles ;
   - inversion exacte et réversible, point chaud conservé ;
-  - jeu rouge : chaque curseur deux fois plus grand, la flèche identique à la noire avec seulement ses pixels noirs passés en rouge, contour sans trou ;
+  - les fichiers écrits : toutes les tailles de 32 à 128 px gardées, écrits une fois, pas réécrits s'ils sont à jour, réécrits s'ils sont abîmés ;
+  - jeu rouge : chaque curseur deux fois plus grand, la flèche identique à la noire avec seulement ses pixels noirs passés en rouge (bords adoucis compris), contour sans trou ;
+  - fichiers laissés par une version précédente supprimés quand les nouveaux sont écrits ;
   - aucun objet Windows perdu après 20 rechargements ;
+  - reconnaissance du pointeur affiché : chacun des 17 curseurs du système à sa poignée, jamais un curseur chargé par un programme ;
+  - le fil de lecture de l'écran : répond à une demande, ne garde que la dernière de 50 demandes d'affilée, s'arrête proprement, lit sur place une fois arrêté ;
+  - curseurs vectoriels : les 17 dessinés en 240 px, même forme et mêmes points chauds que les images produites par Windows lui-même, blanc = inverse exact du noir, rouge aux bords adoucis, chargeables à toutes les tailles, pas redessinés s'ils sont à jour, Direct2D déchargé ensuite ;
   - texte et thèmes dessinés en mémoire ;
   - frontière parcourue pixel par pixel, damier, couleurs vives ;
 - **performance** (`tests/perf.zig`, compilés dans le même mode que l'exe publié, ReleaseFast par défaut) : chaque mesure est affichée et comparée à un seuil environ 10 fois plus large que la valeur mesurée.
@@ -118,14 +159,19 @@ Cette commande lance 107 tests, sans toucher au curseur de votre session :
 zig build test-system
 ```
 
-Ces 10 tests système changent réellement le curseur pendant une trentaine de secondes, déplacent la souris, puis remettent tout en place. Quittez AutoCurseur avant de les lancer. Ils vérifient :
+Ces 18 tests système changent réellement le curseur pendant une minute environ, déplacent la souris, puis remettent tout en place. Quittez AutoCurseur avant de les lancer (`zig build check-system` les compile sans les lancer). Ils vérifient :
 
 - l'application puis la restauration des curseurs, et leur taille ;
 - des curseurs d'une autre taille laissés par un ancien lancement, qui ne doivent pas être repris ;
 - les réglages « vérifications par seconde », « langue » et « secouer » envoyés par le menu, puis mémorisés ; vos réglages du registre sont remis ensuite ;
 - 200 bascules successives ;
-- une vraie secousse de la souris : la flèche affichée devient la rouge en taille double, puis redevient normale ; un simple balayage de l'écran ne déclenche rien, une secousse avec l'option désactivée non plus ;
-- le vrai exécutable : consommation sur 10 s, mémoire, instance unique, fermeture propre et retour du curseur d'origine.
+- sur une fenêtre de test (fond clair ou sombre, flèche ou main des liens, toujours au premier plan) : seul le pointeur affiché change de couleur, chaque autre forme quand elle apparaît, aucune ne reste rouge après une secousse ; changer la couleur du seul pointeur affiché reste rapide même pointeur agrandi ; avec le vrai exécutable, une main qui apparaît est recolorée en moins de 100 ms pendant que la flèche cachée attend son tour ;
+- avec des écrans d'agrandissements différents : sur chaque écran, le curseur réellement affiché par Windows (capturé par l'API de duplication d'écran, `tests/tools/ptrcap.c`) a la taille que Windows donne là à ses propres curseurs, et c'est au pixel près l'image de cette taille dans nos fichiers, pour les jeux noir, blanc et rouge ; test ignoré avec un seul agrandissement ;
+- la notification de taille du pointeur (`0x2029`), suivie de Windows qui remet ses curseurs 300 ms plus tard : AutoCurseur reste réactif et remet les siens ; une rafale de 10 notifications ne le bloque pas ;
+- avec un pointeur agrandi : sur chaque écran, nos curseurs ont la taille et la forme de ceux de Windows ; test ignoré en taille 1, et quand le pointeur est trop grand pour que Windows donne sa forme ;
+- une vraie secousse de la souris : la flèche affichée devient la rouge en taille double, puis redevient normale ; un simple balayage de l'écran, un va-et-vient vif de trois tailles de curseur ou une secousse avec l'option désactivée ne déclenchent rien ;
+- pendant que la souris traverse tout l'écran, AutoCurseur répond sans délai à une question toutes les 50 ms ;
+- le vrai exécutable : noir, puis blanc, puis noir à nouveau quand le fond de la fenêtre de test change, consommation sur 10 s, mémoire, instance unique, fermeture propre et retour du curseur d'origine.
 
 ## Intégration continue
 
@@ -137,8 +183,10 @@ Pour publier une version, poussez un tag `v*` (par exemple `git tag v0.1.0` puis
 
 ```
 src/core.zig      logique pure, sans Windows (décision, luminance, inversion, teinte rouge, secousse, minuterie)
-src/cursors.zig   chargement et fabrication des jeux noir, blanc et rouge, application au système
-src/sampler.zig   lecture de l'écran sous la souris
+src/cursors.zig   écriture des fichiers des jeux noir, blanc et rouge, recoloration du pointeur affiché
+src/curfile.zig   lecture et écriture des fichiers .cur (versions inversée et rouge, toutes tailles)
+src/svgcur.zig    curseurs vectoriels dessinés avec Direct2D, comme Windows 11 pour un pointeur agrandi
+src/sampler.zig   lecture de l'écran sous la souris, sur un fil à part
 src/icon.zig      icône de la zone de notification
 src/i18n.zig      textes du menu en anglais et en français
 src/settings.zig  réglages mémorisés (HKCU\Software\AutoCurseur)
@@ -146,6 +194,7 @@ src/main.zig      fenêtre cachée, menu, minuteries : relie le tout
 src/win32.zig     déclarations de l'API Windows utilisées
 src/lib.zig       point d'entrée des tests unitaires
 tests/            intégration, performance, système
+tests/tools/      capture du curseur affiché, pour les tests système
 packaging/winget/ manifestes winget
 ```
 
@@ -158,7 +207,8 @@ packaging/winget/ manifestes winget
 | menu | vérifications par seconde | 10 | 3, 5, 10 ou 20 quand la souris bouge (`core.RATES`) |
 | menu | langue | automatique | suit la langue d'affichage de Windows : français pour toute variante du français, anglais sinon |
 | menu | secouer pour retrouver | actif | curseur agrandi et rouge quand on secoue la souris |
-| `core.zig` | `SHAKE_TURNS`, `SHAKE_WINDOW_MS` | 4, 1000 | demi-tours nécessaires, et la durée dans laquelle ils doivent tenir |
+| `core.zig` | `SHAKE_TURNS`, `SHAKE_WINDOW_MS` | 5, 1000 | demi-tours amples et consécutifs nécessaires, et la durée dans laquelle ils doivent tenir |
+| `core.zig` | `SHAKE_SEG_FACTOR` | 3 | aller minimal, en tailles de curseur |
 | `core.zig` | `SHAKE_HOLD_MS` | 600 | durée pendant laquelle le curseur reste agrandi après le dernier demi-tour |
 | `core.zig` | `STILL_MS` | 1000 | délai sans mouvement avant le mode lent |
 | `core.zig` | `IDLE_MS` | 250 | période en mode lent (jamais plus fréquente qu'en mouvement) |

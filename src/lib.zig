@@ -5,6 +5,8 @@ const std = @import("std");
 pub const core = @import("core.zig");
 pub const win32 = @import("win32.zig");
 pub const cursors = @import("cursors.zig");
+pub const curfile = @import("curfile.zig");
+pub const svgcur = @import("svgcur.zig");
 pub const sampler = @import("sampler.zig");
 pub const icon = @import("icon.zig");
 pub const settings = @import("settings.zig");
@@ -15,6 +17,8 @@ test {
     _ = core;
     _ = win32;
     _ = cursors;
+    _ = curfile;
+    _ = svgcur;
     _ = sampler;
     _ = icon;
     _ = settings;
@@ -25,7 +29,8 @@ test "aucune allocation dynamique dans le code de l'application" {
     const sources = [_][]const u8{
         @embedFile("main.zig"),     @embedFile("core.zig"), @embedFile("cursors.zig"),
         @embedFile("sampler.zig"),  @embedFile("icon.zig"), @embedFile("win32.zig"),
-        @embedFile("settings.zig"), @embedFile("i18n.zig"),
+        @embedFile("settings.zig"), @embedFile("i18n.zig"), @embedFile("curfile.zig"),
+        @embedFile("svgcur.zig"),
     };
     // motifs assemblés à la compilation pour ne pas apparaître tels quels dans ce fichier
     const banned = [_][]const u8{
@@ -42,8 +47,8 @@ test "aucune allocation dynamique dans le code de l'application" {
     }
 }
 
-test "budget mémoire statique : moins de 400 Ko de tampons" {
-    const total = @sizeOf(@TypeOf(cursors.px_buf)) + @sizeOf(@TypeOf(cursors.mask_buf)) +
+test "budget mémoire statique : moins de 480 Ko de tampons" {
+    const total = @sizeOf(@TypeOf(cursors.src_buf)) + @sizeOf(@TypeOf(cursors.out_buf)) + 8 * 1024 + 2 * 32 * 240 +
         @sizeOf(@TypeOf(sampler.buf)) + @sizeOf(@TypeOf(icon.px)) + @sizeOf(@TypeOf(icon.mask));
-    try std.testing.expect(total < 400 * 1024);
+    try std.testing.expect(total < 480 * 1024);
 }

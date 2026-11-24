@@ -11,6 +11,7 @@ pub const LRESULT = isize;
 pub const HANDLE = ?*anyopaque;
 pub const HWND = HANDLE;
 pub const HDC = HANDLE;
+pub const HMODULE = HANDLE;
 pub const HBITMAP = HANDLE;
 pub const HGDIOBJ = HANDLE;
 pub const HCURSOR = HANDLE;
@@ -25,6 +26,15 @@ pub const WNDPROC = *const fn (HWND, UINT, WPARAM, LPARAM) callconv(.winapi) LRE
 pub const POINT = core.Point;
 
 pub const MAX_PATH = 260;
+pub const GENERIC_READ: DWORD = 0x80000000;
+pub const GENERIC_WRITE: DWORD = 0x40000000;
+pub const FILE_SHARE_READ: DWORD = 1;
+pub const CREATE_ALWAYS: DWORD = 2;
+pub const OPEN_EXISTING: DWORD = 3;
+pub const FILE_ATTRIBUTE_NORMAL: DWORD = 0x80;
+pub const INVALID_FILE_ATTRIBUTES: DWORD = 0xFFFFFFFF;
+pub const MOVEFILE_REPLACE_EXISTING: DWORD = 1;
+pub const INVALID_HANDLE_VALUE: HANDLE = @ptrFromInt(~@as(usize, 0));
 pub const WM_NULL = 0x0000;
 pub const WM_DESTROY = 0x0002;
 pub const WM_CLOSE = 0x0010;
@@ -74,6 +84,8 @@ pub const TRANSPARENT = 1;
 pub const FW_NORMAL = 400;
 pub const FW_BOLD = 700;
 pub const WAIT_OBJECT_0 = 0;
+pub const INFINITE: DWORD = 0xFFFFFFFF;
+pub const STACK_SIZE_PARAM_IS_A_RESERVATION: DWORD = 0x10000;
 pub const IDC_ARROW: LPCWSTR = @ptrFromInt(32512);
 pub const HKCU: HKEY = @ptrFromInt(0x80000001);
 pub const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: HANDLE = @ptrFromInt(@as(usize, @bitCast(@as(isize, -4))));
@@ -92,6 +104,7 @@ pub const WNDCLASSW = extern struct {
     lpszMenuName: ?LPCWSTR = null,
     lpszClassName: LPCWSTR,
 };
+pub const CURSORINFO = extern struct { cbSize: DWORD = @sizeOf(CURSORINFO), flags: DWORD = 0, hCursor: HCURSOR = null, ptScreenPos: POINT = .{} };
 pub const ICONINFO = extern struct { fIcon: BOOL, xHotspot: DWORD, yHotspot: DWORD, hbmMask: HBITMAP, hbmColor: HBITMAP };
 pub const BITMAP = extern struct { bmType: i32, bmWidth: i32, bmHeight: i32, bmWidthBytes: i32, bmPlanes: u16, bmBitsPixel: u16, bmBits: ?*anyopaque };
 pub const BITMAPINFOHEADER = extern struct {
@@ -164,6 +177,7 @@ pub const PROCESS_MEMORY_COUNTERS_EX = extern struct {
 comptime {
     if (@sizeOf(NOTIFYICONDATAW) != 976) @compileError("NOTIFYICONDATAW mal aligné");
     if (@sizeOf(STARTUPINFOW) != 104) @compileError("STARTUPINFOW mal aligné");
+    if (@sizeOf(CURSORINFO) != 24) @compileError("CURSORINFO mal aligné");
 }
 
 /// En-tête d'image 32 bits de haut en bas.
@@ -191,7 +205,17 @@ pub extern "user32" fn GetSystemMetrics(c_int) callconv(.winapi) c_int;
 pub extern "user32" fn SetCursorPos(c_int, c_int) callconv(.winapi) BOOL;
 pub extern "user32" fn GetGuiResources(HANDLE, DWORD) callconv(.winapi) DWORD;
 pub extern "user32" fn LoadImageW(HINSTANCE, LPCWSTR, UINT, c_int, c_int, UINT) callconv(.winapi) HANDLE;
-pub extern "user32" fn LoadCursorW(HINSTANCE, LPCWSTR) callconv(.winapi) HCURSOR;
+/// Le nom peut être un numéro de curseur du système (souvent impair : pas un vrai pointeur u16).
+pub extern "user32" fn LoadCursorW(HINSTANCE, ?*const anyopaque) callconv(.winapi) HCURSOR;
+pub extern "user32" fn GetCursorInfo(*CURSORINFO) callconv(.winapi) BOOL;
+pub const HWINEVENTHOOK = HANDLE;
+pub const WINEVENTPROC = *const fn (HWINEVENTHOOK, DWORD, HWND, i32, i32, DWORD, DWORD) callconv(.winapi) void;
+pub const EVENT_OBJECT_NAMECHANGE: DWORD = 0x800C;
+pub const OBJID_CURSOR: i32 = -9;
+pub const WINEVENT_OUTOFCONTEXT: DWORD = 0x0000;
+pub const WINEVENT_SKIPOWNPROCESS: DWORD = 0x0002;
+pub extern "user32" fn SetWinEventHook(DWORD, DWORD, HMODULE, WINEVENTPROC, DWORD, DWORD, DWORD) callconv(.winapi) HWINEVENTHOOK;
+pub extern "user32" fn UnhookWinEvent(HWINEVENTHOOK) callconv(.winapi) BOOL;
 pub extern "user32" fn CopyIcon(HICON) callconv(.winapi) HICON;
 pub extern "user32" fn SetSystemCursor(HCURSOR, DWORD) callconv(.winapi) BOOL;
 pub extern "user32" fn DestroyCursor(HCURSOR) callconv(.winapi) BOOL;
@@ -244,6 +268,21 @@ pub extern "kernel32" fn CreateProcessW(?LPCWSTR, ?[*:0]u16, ?*anyopaque, ?*anyo
 pub extern "kernel32" fn WaitForSingleObject(HANDLE, DWORD) callconv(.winapi) DWORD;
 pub extern "kernel32" fn TerminateProcess(HANDLE, UINT) callconv(.winapi) BOOL;
 pub extern "kernel32" fn CloseHandle(HANDLE) callconv(.winapi) BOOL;
+pub extern "kernel32" fn CreateEventW(?*anyopaque, BOOL, BOOL, ?LPCWSTR) callconv(.winapi) HANDLE;
+pub extern "kernel32" fn SetEvent(HANDLE) callconv(.winapi) BOOL;
+pub extern "kernel32" fn CreateThread(?*anyopaque, usize, *const fn (?*anyopaque) callconv(.winapi) u32, ?*anyopaque, DWORD, ?*DWORD) callconv(.winapi) HANDLE;
+pub extern "kernel32" fn LoadLibraryW(LPCWSTR) callconv(.winapi) HMODULE;
+pub extern "kernel32" fn GetProcAddress(HMODULE, [*:0]const u8) callconv(.winapi) ?*const anyopaque;
+pub extern "kernel32" fn FreeLibrary(HMODULE) callconv(.winapi) BOOL;
+pub extern "kernel32" fn GetEnvironmentVariableW(LPCWSTR, [*]u16, DWORD) callconv(.winapi) DWORD;
+pub extern "kernel32" fn CreateDirectoryW(LPCWSTR, ?*anyopaque) callconv(.winapi) BOOL;
+pub extern "kernel32" fn GetFileAttributesW(LPCWSTR) callconv(.winapi) DWORD;
+pub extern "kernel32" fn CreateFileW(LPCWSTR, DWORD, DWORD, ?*anyopaque, DWORD, DWORD, HANDLE) callconv(.winapi) HANDLE;
+pub extern "kernel32" fn GetFileSizeEx(HANDLE, *i64) callconv(.winapi) BOOL;
+pub extern "kernel32" fn ReadFile(HANDLE, [*]u8, DWORD, *DWORD, ?*anyopaque) callconv(.winapi) BOOL;
+pub extern "kernel32" fn WriteFile(HANDLE, [*]const u8, DWORD, *DWORD, ?*anyopaque) callconv(.winapi) BOOL;
+pub extern "kernel32" fn MoveFileExW(LPCWSTR, LPCWSTR, DWORD) callconv(.winapi) BOOL;
+pub extern "kernel32" fn DeleteFileW(LPCWSTR) callconv(.winapi) BOOL;
 pub extern "kernel32" fn Sleep(DWORD) callconv(.winapi) void;
 pub extern "kernel32" fn GetUserDefaultUILanguage() callconv(.winapi) u16;
 pub extern "kernel32" fn GetTickCount() callconv(.winapi) DWORD;

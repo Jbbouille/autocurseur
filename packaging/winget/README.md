@@ -18,7 +18,7 @@ Once merged:
 winget install Jbbouille.AutoCurseur
 ```
 
-winget copies the exe under `%LOCALAPPDATA%\Microsoft\WinGet\Packages\` and adds the `autocurseur` command. Quit AutoCurseur before `winget upgrade`, since a running exe cannot be replaced. `winget uninstall` removes the exe but not the settings (`HKCU\Software\AutoCurseur`) nor the *Start with Windows* entry: untick that option before uninstalling.
+winget copies the exe under `%LOCALAPPDATA%\Microsoft\WinGet\Packages\` and adds the `autocurseur` command. Quit AutoCurseur before `winget upgrade`, since a running exe cannot be replaced. `winget uninstall` removes the exe but not the settings (`HKCU\Software\AutoCurseur`), the cursor files (`%LOCALAPPDATA%\AutoCurseur`) nor the *Start with Windows* entry: untick that option before uninstalling.
 
 ## Next versions
 

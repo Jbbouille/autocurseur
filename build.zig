@@ -13,7 +13,6 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
-            .single_threaded = true,
             .strip = true,
         }),
     });
@@ -55,9 +54,19 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&perf.step);
 
     // système : change le vrai curseur et lance l'exe ; à part, sur demande
+    // outil en C des tests système : forme du pointeur réellement affichée (duplication d'écran)
+    const ptrcap = b.addExecutable(.{ .name = "ptrcap", .root_module = b.createModule(.{
+        .target = target,
+        .optimize = .fast,
+        .link_libc = true,
+    }) });
+    ptrcap.root_module.addCSourceFile(.{ .file = b.path("tests/tools/ptrcap.c") });
+    for ([_][]const u8{ "d3d11", "dxgi", "user32", "gdi32" }) |lib| ptrcap.root_module.linkSystemLibrary(lib, .{});
+
     const opts = b.addOptions();
     opts.addOptionPath("exe_path", exe.getEmittedBin());
-    const system = b.addRunArtifact(b.addTest(.{ .name = "system", .root_module = b.createModule(.{
+    opts.addOptionPath("ptrcap_path", ptrcap.getEmittedBin());
+    const system_tests = b.addTest(.{ .name = "system", .root_module = b.createModule(.{
         .root_source_file = b.path("tests/system.zig"),
         .target = target,
         .optimize = .debug,
@@ -65,7 +74,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "autocurseur", .module = lib_debug },
             .{ .name = "build_options", .module = opts.createModule() },
         },
-    }) }));
+    }) });
+    const system = b.addRunArtifact(system_tests);
     system.has_side_effects = true;
     b.step("test-system", "Tests système : change le curseur et lance l'exe (quittez AutoCurseur avant)").dependOn(&system.step);
+    // compiler les tests système sans les lancer (sans toucher au curseur)
+    b.step("check-system", "Compiler les tests système sans les lancer").dependOn(&system_tests.step);
 }

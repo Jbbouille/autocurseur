@@ -7,6 +7,24 @@ const w = app.win32;
 const testing = std.testing;
 pub const L = std.unicode.utf8ToUtf16LeStringLiteral;
 
+/// Contenu entier du fichier `path` (à libérer avec testing.allocator).
+pub fn readFile(path: [*:0]const u16) ![]u8 {
+    const f = w.CreateFileW(path, w.GENERIC_READ, w.FILE_SHARE_READ, null, w.OPEN_EXISTING, w.FILE_ATTRIBUTE_NORMAL, null);
+    if (f == w.INVALID_HANDLE_VALUE) return error.FichierIntrouvable;
+    defer _ = w.CloseHandle(f);
+    var size: i64 = 0;
+    if (w.GetFileSizeEx(f, &size) == 0) return error.TailleIllisible;
+    const buf = try testing.allocator.alloc(u8, @intCast(size));
+    errdefer testing.allocator.free(buf);
+    var n: usize = 0;
+    while (n < buf.len) {
+        var got: u32 = 0;
+        if (w.ReadFile(f, buf[n..].ptr, @intCast(buf.len - n), &got, null) == 0 or got == 0) return error.Lecture;
+        n += got;
+    }
+    return buf;
+}
+
 /// Comme l'application : le processus gère l'agrandissement d'écran, sinon Windows lui
 /// présente des tailles de curseur et des coordonnées « virtuelles » à 96 DPI.
 pub fn dpiAware() void {
@@ -82,6 +100,9 @@ pub const Stats = struct {
     mono: bool,
     opaque_px: usize = 0,
     white_px: usize = 0,
+    /// pixels visibles gris (noir, blanc ou nuance) : les seuls qu'AutoCurseur inverse
+    gray_px: usize = 0,
+    gray_white_px: usize = 0,
 
     pub fn whiteRatio(s: Stats) f32 {
         if (s.opaque_px == 0) return 0;
@@ -129,6 +150,10 @@ pub fn stats(c: w.HCURSOR) !Stats {
             if (!visible) continue;
             s.opaque_px += 1;
             if (core.luma(p) > 128) s.white_px += 1;
+            if (core.isGray(p)) {
+                s.gray_px += 1;
+                if (core.luma(p) > 128) s.gray_white_px += 1;
+            }
         }
     } else {
         s.width = mbm.bmWidth;
@@ -142,20 +167,23 @@ pub fn stats(c: w.HCURSOR) !Stats {
                 }
             }
         }
+        s.gray_px = s.opaque_px;
+        s.gray_white_px = s.white_px;
     }
     return s;
 }
 
-/// Pour un curseur monochrome : nombre de pixels du corps (blancs si `core_white`, sinon noirs)
-/// qui touchent directement un pixel transparent, c'est-à-dire les trous du contour.
-/// Renvoie null pour un curseur couleur (bords anticrénelés, la notion ne s'applique pas).
+/// Nombre de pixels du corps (blancs si `core_white`, sinon noirs) qui touchent directement un
+/// pixel transparent, c'est-à-dire les trous du contour. Curseur couleur à transparence : le
+/// corps est fait des pixels gris bien visibles, le transparent des pixels d'opacité nulle
+/// (les bords adoucis ne sont pas des trous). Null pour un curseur couleur sans transparence.
 pub fn outlineGaps(c: w.HCURSOR, core_white: bool) !?usize {
     var ii: w.ICONINFO = undefined;
     if (w.GetIconInfo(c, &ii) == 0) return error.GetIconInfo;
     defer _ = w.DeleteObject(ii.hbmMask);
     if (ii.hbmColor) |color| {
-        _ = w.DeleteObject(color);
-        return null;
+        defer _ = w.DeleteObject(color);
+        return colorOutlineGaps(color, core_white);
     }
     var mbm: w.BITMAP = undefined;
     _ = w.GetObjectW(ii.hbmMask, @sizeOf(w.BITMAP), &mbm);
@@ -181,6 +209,39 @@ pub fn outlineGaps(c: w.HCURSOR, core_white: bool) !?usize {
                 (y > 0 and Px.transparent(mask, stride, x, y - 1, h)) or
                 (y + 1 < h and Px.transparent(mask, stride, x, y + 1, h));
             if (touches) gaps += 1;
+        }
+    }
+    return gaps;
+}
+
+fn isClearPx(q: u32) bool {
+    return q >> 24 == 0;
+}
+
+fn colorOutlineGaps(color: w.HBITMAP, core_white: bool) !?usize {
+    var bm: w.BITMAP = undefined;
+    _ = w.GetObjectW(color, @sizeOf(w.BITMAP), &bm);
+    const width: usize = @intCast(bm.bmWidth);
+    const height: usize = @intCast(bm.bmHeight);
+    const px = try testing.allocator.alloc(u32, width * height);
+    defer testing.allocator.free(px);
+    var bi = w.bmi(bm.bmWidth, bm.bmHeight);
+    const dc = w.GetDC(null);
+    defer _ = w.ReleaseDC(null, dc);
+    if (w.GetDIBits(dc, color, 0, @intCast(height), @ptrCast(px.ptr), &bi, w.DIB_RGB_COLORS) == 0) return error.GetDIBits;
+    const has_alpha = for (px) |p| {
+        if (p >> 24 != 0) break true;
+    } else false;
+    if (!has_alpha) return null;
+    var gaps: usize = 0;
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const p = px[y * width + x];
+            if (p >> 24 <= 128 or !core.isGray(p)) continue;
+            if ((core.luma(p) > 128) != core_white) continue; // pas le corps
+            if ((x > 0 and isClearPx(px[y * width + x - 1])) or (x + 1 < width and isClearPx(px[y * width + x + 1])) or
+                (y > 0 and isClearPx(px[(y - 1) * width + x])) or (y + 1 < height and isClearPx(px[(y + 1) * width + x])))
+                gaps += 1;
         }
     }
     return gaps;
@@ -302,4 +363,47 @@ pub fn cyclesPerUs() f64 {
 
 pub fn report(name: []const u8, value: f64, unit: []const u8, limit: f64) void {
     std.debug.print("  {s:<52} {d:>10.3} {s}   (seuil {d} {s})\n", .{ name, value, unit, limit, unit });
+}
+
+// ---------------------------------------------------------------------
+// Écrans (tests système avec plusieurs écrans)
+// ---------------------------------------------------------------------
+
+const RECT = extern struct { left: i32, top: i32, right: i32, bottom: i32 };
+const MonitorEnumProc = *const fn (?*anyopaque, ?*anyopaque, *RECT, isize) callconv(.winapi) w.BOOL;
+extern "user32" fn EnumDisplayMonitors(?*anyopaque, ?*const RECT, MonitorEnumProc, isize) callconv(.winapi) w.BOOL;
+extern "shcore" fn GetDpiForMonitor(?*anyopaque, c_int, *u32, *u32) callconv(.winapi) i32;
+
+pub const Monitor = struct { center: core.Point, dpi: u32 };
+
+var mon_buf: [8]Monitor = undefined;
+var mon_count: usize = 0;
+
+fn onMonitor(m: ?*anyopaque, _: ?*anyopaque, r: *RECT, _: isize) callconv(.winapi) w.BOOL {
+    if (mon_count == mon_buf.len) return 0;
+    var dx: u32 = 96;
+    var dy: u32 = 96;
+    _ = GetDpiForMonitor(m, 0, &dx, &dy); // MDT_EFFECTIVE_DPI
+    mon_buf[mon_count] = .{ .center = .{ .x = @divTrunc(r.left + r.right, 2), .y = @divTrunc(r.top + r.bottom, 2) }, .dpi = dx };
+    mon_count += 1;
+    return 1;
+}
+
+/// Écrans branchés : centre et agrandissement (DPI). Le processus doit gérer le DPI.
+pub fn monitors() []const Monitor {
+    mon_count = 0;
+    _ = EnumDisplayMonitors(null, null, onMonitor, 0);
+    return mon_buf[0..mon_count];
+}
+
+/// Nombre d'agrandissements différents parmi les écrans.
+pub fn distinctDpis(ms: []const Monitor) usize {
+    var n: usize = 0;
+    for (ms, 0..) |m, i| {
+        const seen = for (ms[0..i]) |o| {
+            if (o.dpi == m.dpi) break true;
+        } else false;
+        if (!seen) n += 1;
+    }
+    return n;
 }

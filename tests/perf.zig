@@ -12,6 +12,15 @@ const cursors = app.cursors;
 const sampler = app.sampler;
 const testing = std.testing;
 
+/// Mesures de chargement prévues pour la taille 1 du pointeur : agrandi dans les Paramètres,
+/// Windows fabrique des curseurs bien plus grands (jusqu'à 13 fois plus lent à la taille maximale).
+fn skipIfEnlarged() !void {
+    if (cursors.pointerBase() > 32) {
+        std.debug.print("  pointeur agrandi dans les Paramètres : mesure prévue pour la taille 1, ignorée\n", .{});
+        return error.SkipZigTest;
+    }
+}
+
 test "perf : luminance moyenne d'une zone 96x96" {
     var px: [core.BOX_MAX * core.BOX_MAX]u32 = undefined;
     var prng = std.Random.DefaultPrng.init(1);
@@ -58,6 +67,7 @@ test "perf : inversion des pixels d'un curseur 256x256" {
 }
 
 test "perf : chargement complet des deux jeux (17 curseurs x 2) à 80 px" {
+    try skipIfEnlarged();
     defer cursors.free();
     cursors.load(80); // premier chargement : fichiers mis en cache par le système
     const n = 10;
@@ -68,18 +78,44 @@ test "perf : chargement complet des deux jeux (17 curseurs x 2) à 80 px" {
     try testing.expect(r.wall_us < 500_000);
 }
 
-test "perf : génération d'un curseur inversé (flèche 80 px)" {
-    defer cursors.free();
-    cursors.load(80);
+test "perf : fabrication d'un fichier rouge (flèche, 5 tailles), en mémoire" {
+    var buf: [2 * w.MAX_PATH]u16 = undefined;
+    const path = cursors.pathOf(.black, 0, &buf).?; // fichier de Windows
+    const src = try h.readFile(path.ptr);
+    defer testing.allocator.free(src);
+    const n = 200;
+    var len: usize = 0;
+    const t = h.Timer.start();
+    for (0..n) |_| len = app.curfile.derive(src, .red, &cursors.out_buf).?;
+    const r = t.perIteration(n);
+    std.mem.doNotOptimizeAway(len);
+    h.report("fabrication du fichier rouge de la flèche", r.wall_us, "us", 5000);
+    try testing.expect(r.wall_us < 5000);
+}
+
+test "perf : préparation au démarrage quand les fichiers sont déjà à jour" {
+    _ = cursors.prepare(true);
+    const n = 5;
+    const t = h.Timer.start();
+    for (0..n) |_| _ = cursors.prepare(true);
+    const r = t.perIteration(n);
+    h.report("vérification des 34 fichiers fabriqués", r.wall_us / 1000, "ms", 200);
+    try testing.expect(r.wall_us < 200_000);
+}
+
+test "perf : chargement d'un curseur depuis son fichier (fait 17 fois par bascule)" {
+    try skipIfEnlarged();
+    h.dpiAware();
+    _ = cursors.prepare(true);
     const n = 200;
     const t = h.Timer.start();
-    for (0..n) |_| {
-        const c = cursors.invert(cursors.black[0]) orelse return error.Invert;
+    for (0..n) |i| {
+        const c = cursors.loadOne(if (i % 2 == 0) .white else .red, i % cursors.COUNT, 48) orelse return error.Chargement;
         _ = w.DestroyCursor(c);
     }
     const r = t.perIteration(n);
-    h.report("inversion d'un curseur 80 px", r.wall_us, "us", 5000);
-    try testing.expect(r.wall_us < 5000);
+    h.report("chargement d'un curseur depuis son fichier", r.wall_us, "us", 3000);
+    try testing.expect(r.wall_us < 3000);
 }
 
 test "perf : lecture d'une zone 60x60 depuis une image en mémoire" {
@@ -144,6 +180,7 @@ test "perf : détection de secousse, par lecture de position" {
 }
 
 test "perf : chargement du jeu rouge agrandi (17 curseurs)" {
+    try skipIfEnlarged();
     h.dpiAware();
     defer cursors.freeRed();
     cursors.loadRed(64);
@@ -153,4 +190,26 @@ test "perf : chargement du jeu rouge agrandi (17 curseurs)" {
     const r = t.perIteration(n);
     h.report("chargement des 17 curseurs rouges à 128 px", r.wall_us / 1000, "ms", 500);
     try testing.expect(r.wall_us < 500_000);
+}
+
+fn privateMb() f64 {
+    var mem: w.PROCESS_MEMORY_COUNTERS_EX = .{};
+    _ = w.K32GetProcessMemoryInfo(w.GetCurrentProcess(), &mem, @sizeOf(w.PROCESS_MEMORY_COUNTERS_EX));
+    return @as(f64, @floatFromInt(mem.PrivateUsage)) / (1024 * 1024);
+}
+
+test "perf : curseurs vectoriels, dessin avec Direct2D puis déchargement" {
+    if (!cursors.hasVectorShapes()) return error.SkipZigTest;
+    _ = cursors.prepareVector(true); // premier passage : bibliothèques mises en cache par Windows
+    const before = privateMb();
+    try testing.expect(cursors.useDefaultDir()); // oublie l'état : tout est redessiné et comparé
+    const t = h.Timer.start();
+    _ = cursors.prepareVector(true);
+    const r = t.perIteration(1);
+    const after = privateMb();
+    h.report("dessin et vérification des 51 curseurs vectoriels", r.wall_us / 1000, "ms", 2000);
+    h.report("mémoire privée gardée après déchargement de Direct2D", after - before, "Mo", 4);
+    try testing.expect(r.wall_us < 2_000_000);
+    try testing.expect(after - before < 4);
+    try testing.expect(w.GetModuleHandleW(std.unicode.utf8ToUtf16LeStringLiteral("d2d1.dll")) == null);
 }

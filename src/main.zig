@@ -6,7 +6,8 @@
 //!
 //! Mémoire : aucune allocation dynamique. Tous les tampons sont des tableaux globaux
 //! de taille fixe ; seuls les objets Windows (curseurs, bitmaps, fenêtre, icônes)
-//! sont créés par le système.
+//! sont créés par le système. Les versions inversée et rouge des curseurs sont écrites
+//! une fois dans %LOCALAPPDATA%\AutoCurseur\cursors (voir cursors.zig).
 
 const std = @import("std");
 const core = @import("core.zig");
@@ -21,8 +22,10 @@ const L = std.unicode.utf8ToUtf16LeStringLiteral;
 const APP_NAME = L("AutoCurseur");
 const RUN_KEY = L("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 const WM_TRAY = w.WM_APP + 1;
+const WM_SAMPLE = w.WM_APP + 2; // résultat d'une lecture d'écran (fil de lecture, voir sampler.zig)
 const TIMER_ID = 1;
 const TIMER_SHAKE = 2;
+const TIMER_SETTLE = 3; // remises en place après un changement de réglages
 const ID_ACTIVE = 1;
 const ID_STARTUP = 2;
 const ID_QUIT = 3;
@@ -38,11 +41,15 @@ var shake_on = true; // option « secouer pour retrouver »
 var shake: core.Shake = core.Shake.init(32);
 var shake_timer = false; // la minuterie rapide de détection tourne-t-elle ?
 var big = false; // le jeu rouge agrandi est-il affiché ?
+var base: u32 = 32; // réglage « taille du pointeur » au dernier chargement
+var settle_step: usize = 0; // prochaine étape de core.SETTLE_MS
+var shape_hook: w.HWINEVENTHOOK = null; // avis de Windows quand la forme du pointeur change
 var wnd: w.HWND = null;
 var msg_taskbar: u32 = 0;
 var ico_on: w.HICON = null;
 var ico_off: w.HICON = null;
 var nid: w.NOTIFYICONDATAW = .{};
+var box_side: i32 = core.BOX_MIN; // côté de la zone d'écran lue
 var exe_buf: [w.MAX_PATH]u16 = undefined;
 var reg_buf: [w.MAX_PATH + 4]u16 = undefined;
 
@@ -53,27 +60,57 @@ fn reload() void {
     // sur des curseurs laissés par un lancement précédent (arrêté de force, par exemple).
     cursors.restore();
     const s = cursors.systemSize();
-    cursors.load(s);
-    if (shake_on) cursors.loadRed(s) else cursors.freeRed();
+    base = cursors.pointerBase();
+    cursors.base = base;
+    useVectorIfEnlarged();
+    cursors.size = s; // les curseurs sont relus depuis leurs fichiers à chaque application
     shake = core.Shake.init(s);
     big = false;
-    sampler.resize(core.boxSize(s));
+    // la zone lue couvre le curseur tel qu'il est affiché, agrandi par l'accessibilité
+    box_side = core.boxSize(core.displayedSize(s, base));
     shade = .unknown;
 }
 
+/// Demande une lecture de l'écran sous `p` au fil de lecture ; la réponse arrive en WM_SAMPLE.
 fn update(p: core.Point) void {
-    const l = sampler.sampleScreen(p) orelse return;
+    sampler.request(p, box_side);
+}
+
+fn setOf(s: core.Shade) cursors.Set {
+    return if (s == .black) .black else .white;
+}
+
+/// Luminance lue sous la souris : choix du jeu noir ou blanc.
+fn onSample(l: u32) void {
+    if (!active) return; // réponse arrivée après la mise en pause
     const want = core.decide(shade, l, .{});
     if (want != shade) {
         shade = want;
-        if (!big) cursors.apply(want == .black); // agrandi : on attend la fin pour changer
+        if (!big) cursors.show(setOf(want)); // agrandi : on attend la fin pour changer
     }
 }
 
 /// Fin de l'agrandissement : retour au jeu noir ou blanc qui convient au fond.
 fn showNormal() void {
     big = false;
-    if (shade == .unknown) cursors.restore() else cursors.apply(shade == .black);
+    if (shade == .unknown) cursors.restore() else cursors.show(setOf(shade));
+}
+
+/// Windows prévient (pour tout le système) qu'un nom a changé ; pour le pointeur, c'est sa
+/// forme : la nouvelle forme prend tout de suite la couleur voulue.
+fn onWinEvent(_: w.HWINEVENTHOOK, _: w.DWORD, _: w.HWND, obj: i32, _: i32, _: w.DWORD, _: w.DWORD) callconv(.winapi) void {
+    if (obj == w.OBJID_CURSOR and active) cursors.fix();
+}
+
+/// Écoute (ou non) les changements de forme du pointeur, sans DLL injectée : les avis
+/// arrivent dans la boucle de messages de ce fil.
+fn listenShapes(on: bool) void {
+    if (on and shape_hook == null) {
+        shape_hook = w.SetWinEventHook(w.EVENT_OBJECT_NAMECHANGE, w.EVENT_OBJECT_NAMECHANGE, null, onWinEvent, 0, 0, w.WINEVENT_OUTOFCONTEXT | w.WINEVENT_SKIPOWNPROCESS);
+    } else if (!on and shape_hook != null) {
+        _ = w.UnhookWinEvent(shape_hook);
+        shape_hook = null;
+    }
 }
 
 fn restore() void {
@@ -90,11 +127,51 @@ fn onTimer() void {
     if (w.GetCursorPos(&p) == 0) return;
     const a = ticker.tick(p);
     if (a.interval_ms) |ms| setTimer(ms);
+    // filet de sécurité si un avis de changement de forme s'est perdu
+    cursors.fix();
     // la détection de secousse ne tourne que pendant que la souris bouge
     if (shake_on) {
         if (ticker.slow) stopShake() else startShake();
     }
     if (a.sample) update(p);
+}
+
+/// Pointeur agrandi dans les Paramètres d'accessibilité : comme Windows 11, curseurs dessinés à
+/// partir de ses dessins vectoriels (fabriqués à la première utilisation) ; sinon, classiques.
+fn useVectorIfEnlarged() void {
+    if (base > 32) {
+        _ = cursors.prepareVector(shake_on);
+        cursors.useVector(cursors.vectorReady());
+    } else {
+        cursors.useVector(false);
+    }
+}
+
+// ---------- après un changement de réglages ----------
+
+/// Notification de changement de réglages : (re)démarre le compte à rebours.
+fn startSettle() void {
+    settle_step = 0;
+    _ = w.SetCoalescableTimer(wnd, TIMER_SETTLE, core.SETTLE_MS[0], null, 0); // remplace un compte en cours
+}
+
+fn onSettle() void {
+    if (settle_step == 0) {
+        // la taille (agrandissement d'écran) ou le réglage d'accessibilité ont pu changer
+        reload();
+    } else {
+        // force la remise en place : Windows a pu remettre ses curseurs sans prévenir
+        shade = .unknown;
+        cursors.forget();
+    }
+    var p: core.Point = .{};
+    if (w.GetCursorPos(&p) != 0) update(p); // tout de suite, sans attendre le prochain tic
+    settle_step += 1;
+    if (settle_step < core.SETTLE_MS.len) {
+        _ = w.SetCoalescableTimer(wnd, TIMER_SETTLE, core.SETTLE_MS[settle_step] - core.SETTLE_MS[settle_step - 1], null, 0);
+    } else {
+        _ = w.KillTimer(wnd, TIMER_SETTLE);
+    }
 }
 
 // ---------- secouer pour retrouver ----------
@@ -123,7 +200,7 @@ fn onShakeTimer() void {
     switch (shake.feed(w.GetTickCount(), p)) {
         .start => {
             big = true;
-            cursors.applyRed();
+            cursors.show(.red);
         },
         .stop => showNormal(),
         .none => {},
@@ -135,10 +212,10 @@ fn setShake(on: bool) void {
     shake_on = on;
     settings.saveShake(on);
     if (on) {
-        cursors.loadRed(cursors.size);
+        _ = cursors.prepare(true); // fichiers du jeu rouge
+        if (cursors.usingVector()) _ = cursors.prepareVector(true);
     } else {
         stopShake();
-        cursors.freeRed();
     }
 }
 
@@ -171,12 +248,14 @@ fn setTip(s: []const u16) void {
 
 fn setActive(on: bool) void {
     active = on;
+    listenShapes(on);
     if (on) {
         shade = .unknown;
         ticker = core.Ticker.init(rate);
         setTimer(ticker.tick_ms);
     } else {
         _ = w.KillTimer(wnd, TIMER_ID);
+        _ = w.KillTimer(wnd, TIMER_SETTLE);
         _ = killShake();
         restore();
     }
@@ -251,8 +330,16 @@ fn showMenu() void {
 
 fn wndProc(h: w.HWND, msg: u32, wp: w.WPARAM, lp: w.LPARAM) callconv(.winapi) w.LRESULT {
     switch (msg) {
+        WM_SAMPLE => {
+            if (wp != sampler.NO_RESULT) onSample(@intCast(wp));
+            return 0;
+        },
         w.WM_TIMER => {
-            if (wp == TIMER_SHAKE) onShakeTimer() else onTimer();
+            switch (wp) {
+                TIMER_SHAKE => onShakeTimer(),
+                TIMER_SETTLE => onSettle(),
+                else => onTimer(),
+            }
             return 0;
         },
         WM_TRAY => {
@@ -279,14 +366,18 @@ fn wndProc(h: w.HWND, msg: u32, wp: w.WPARAM, lp: w.LPARAM) callconv(.winapi) w.
             return 0;
         },
         w.WM_SETTINGCHANGE, w.WM_DISPLAYCHANGE => {
-            // taille du pointeur changée dans les Paramètres : on recharge
-            if (cursors.systemSize() != cursors.size) reload();
-            // quelqu'un a rechargé les curseurs système : on réapplique au prochain tic
-            if (msg == w.WM_SETTINGCHANGE and wp == w.SPI_SETCURSORS) shade = .unknown;
+            // Taille du pointeur changée dans les Paramètres (notification 0x2029), écran
+            // branché… Windows remet alors ses propres curseurs, parfois après sa notification
+            // et sans en envoyer d'autre. On ne touche à rien pendant qu'il travaille : on remet
+            // les nôtres une fois le calme revenu, en plusieurs fois (core.SETTLE_MS).
+            if (active) startSettle();
             return 0;
         },
         w.WM_DESTROY => {
             _ = w.KillTimer(h, TIMER_ID);
+            _ = w.KillTimer(h, TIMER_SETTLE);
+            listenShapes(false);
+            sampler.stopWorker(1000);
             _ = killShake();
             if (active) restore();
             _ = w.Shell_NotifyIconW(w.NIM_DELETE, &nid);
@@ -318,7 +409,10 @@ pub fn main() void {
     rate = settings.loadRate();
     applyLang(settings.loadLang());
     shake_on = settings.loadShake();
-    sampler.init();
+    // fichiers des versions inversée et rouge (réécrits seulement s'ils ont changé)
+    _ = cursors.useDefaultDir();
+    _ = cursors.prepare(shake_on);
+    _ = sampler.startWorker(wnd, WM_SAMPLE); // sans fil, les lectures se font sur place
     reload();
     ico_on = icon.create(true);
     ico_off = icon.create(false);

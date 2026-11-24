@@ -2,7 +2,7 @@
 //!
 //! - `decide`      : choix noir / blanc avec hystérésis
 //! - `luma`        : luminance perçue d'un pixel, `averageLuma` d'une zone
-//! - `invertColorPixels` / `invertMonoMask` : fabrication de la version inversée d'un curseur
+//! - `invertColorPixels` / `invertMono` : fabrication de la version inversée d'un curseur
 //! - `sampleOrigin`: position de la zone lue à l'écran
 //! - `Ticker`      : rythme de la minuterie (rapide quand la souris bouge, lent sinon)
 //! - `Shake`       : détection d'une souris secouée, et version rouge agrandie des curseurs
@@ -206,13 +206,12 @@ pub fn invertColorPixels(px: []u32, w: usize, mask: []const u8, mask_stride: usi
     }
 }
 
-/// Inverse un curseur monochrome. Son masque fait deux fois la hauteur : moitié haute = ET,
-/// moitié basse = OU exclusif. Pixel opaque (ET = 0) : OU exclusif 0 = noir, 1 = blanc -> on bascule.
+/// Inverse une image monochrome de curseur : `xor_bits` (couleur) et `and_bits` (masque de
+/// transparence) ont la même disposition. Pixel opaque (ET = 0) : la couleur bascule.
 /// Pixels transparents (ET = 1, OUX = 0) et « inverse l'écran » (ET = 1, OUX = 1) : inchangés.
-pub fn invertMonoMask(mask: []u8) void {
-    std.debug.assert(mask.len % 2 == 0);
-    const half = mask.len / 2;
-    for (mask[0..half], mask[half..]) |and_bits, *xor_bits| xor_bits.* ^= ~and_bits;
+pub fn invertMono(xor_bits: []u8, and_bits: []const u8) void {
+    std.debug.assert(xor_bits.len == and_bits.len);
+    for (xor_bits, and_bits) |*x, a| x.* ^= ~a;
 }
 
 test "isGray : noir, blanc, gris oui ; couleurs franches non" {
@@ -277,26 +276,28 @@ test "invertColorPixels : deux inversions redonnent l'image d'origine" {
     try testing.expectEqualSlices(u32, &orig, &px);
 }
 
-test "invertMonoMask : opaques inversés, transparents et « inverse l'écran » gardés" {
-    // une ligne de 8 pixels, stride 1 : moitié haute ET, moitié basse OUX
+test "invertMono : opaques inversés, transparents et « inverse l'écran » gardés" {
+    // une ligne de 8 pixels
     //   pixel : 0 noir, 1 blanc, 2 transparent, 3 inverse-écran, 4-7 noir
     //   ET    : 0 0 1 1 0 0 0 0  = 0b0011_0000
     //   OUX   : 0 1 0 1 0 0 0 0  = 0b0101_0000
-    var mask = [_]u8{ 0b0011_0000, 0b0101_0000 };
-    invertMonoMask(&mask);
-    try testing.expectEqual(@as(u8, 0b0011_0000), mask[0]); // ET inchangé
+    const and_bits = [_]u8{0b0011_0000};
+    var xor_bits = [_]u8{0b0101_0000};
+    invertMono(&xor_bits, &and_bits);
     //   OUX attendu : 1 0 0 1 1 1 1 1
-    try testing.expectEqual(@as(u8, 0b1001_1111), mask[1]);
+    try testing.expectEqual(@as(u8, 0b1001_1111), xor_bits[0]);
 }
 
-test "invertMonoMask : deux inversions redonnent le masque d'origine" {
+test "invertMono : deux inversions redonnent l'image d'origine" {
     var prng = std.Random.DefaultPrng.init(7);
-    var mask: [512]u8 = undefined;
-    prng.random().bytes(&mask);
-    const orig = mask;
-    invertMonoMask(&mask);
-    invertMonoMask(&mask);
-    try testing.expectEqualSlices(u8, &orig, &mask);
+    var xor_bits: [256]u8 = undefined;
+    var and_bits: [256]u8 = undefined;
+    prng.random().bytes(&xor_bits);
+    prng.random().bytes(&and_bits);
+    const orig = xor_bits;
+    invertMono(&xor_bits, &and_bits);
+    invertMono(&xor_bits, &and_bits);
+    try testing.expectEqualSlices(u8, &orig, &xor_bits);
 }
 
 // =====================================================================
@@ -314,16 +315,27 @@ pub fn sampleOrigin(p: Point, box: i32, screen: Rect) Point {
     };
 }
 
-/// Taille des curseurs en pixels.
+/// Taille des curseurs à demander à Windows, en pixels.
 /// - `measured` : largeur de la flèche que Windows utilise en ce moment. C'est la référence :
 ///   Windows arrondit par paliers (à 250 % d'affichage, il prend 64 px et non 32 × 2,5 = 80).
-/// - repli si elle est illisible : `metric` (SM_CXCURSOR, taille standard à l'échelle actuelle)
-///   × réglage « taille du pointeur » `base` / 32.
-pub fn cursorSize(measured: i32, base: u32, metric: i32) i32 {
+/// - repli si elle est illisible : `metric` (SM_CXCURSOR, taille standard à l'échelle actuelle).
+/// Le réglage « taille du pointeur » de l'accessibilité n'entre pas en compte : Windows
+/// l'applique lui-même à l'affichage, à ses curseurs comme aux nôtres (voir displayedSize).
+pub fn cursorSize(measured: i32, metric: i32) i32 {
     if (measured >= 16 and measured <= MAX_CUR) return measured;
-    const b: i32 = if (base < 16 or base > 256) 32 else @intCast(base);
-    const m: i32 = if (metric < 16 or metric > 256) 32 else metric;
-    return @min(@divTrunc(m * b, 32), MAX_CUR);
+    return if (metric < 16 or metric > MAX_CUR) 32 else metric;
+}
+
+/// Réglage « taille du pointeur » (CursorBaseSize : 32 pour la taille 1, puis par pas de 16),
+/// ramené à des valeurs possibles.
+pub fn pointerBase(base: u32) u32 {
+    return if (base < 32 or base > 256) 32 else base;
+}
+
+/// Taille à laquelle Windows affiche un curseur de `cursor_px` sur l'écran principal, une fois
+/// appliqué le réglage « taille du pointeur » `base` (48 px et taille 80 -> 120 px).
+pub fn displayedSize(cursor_px: i32, base: u32) i32 {
+    return @divTrunc(cursor_px * @as(i32, @intCast(pointerBase(base))), 32);
 }
 
 /// Côté de la zone lue : les trois quarts du curseur, borné.
@@ -359,24 +371,30 @@ test "sampleOrigin : écran virtuel à coordonnées négatives (écran à gauche
 }
 
 test "cursorSize : la taille mesurée sur Windows l'emporte" {
-    try testing.expectEqual(@as(i32, 64), cursorSize(64, 32, 64));
-    try testing.expectEqual(@as(i32, 64), cursorSize(64, 999, 0)); // même si le reste est absurde
-    try testing.expectEqual(@as(i32, 48), cursorSize(48, 32, 64));
+    try testing.expectEqual(@as(i32, 64), cursorSize(64, 64));
+    try testing.expectEqual(@as(i32, 64), cursorSize(64, 0)); // même si la métrique est absurde
+    try testing.expectEqual(@as(i32, 48), cursorSize(48, 64));
 }
 
-test "cursorSize : repli sur la taille standard × réglage de taille" {
-    try testing.expectEqual(@as(i32, 64), cursorSize(0, 32, 64)); // 250 % : palier de 64 px
-    try testing.expectEqual(@as(i32, 96), cursorSize(0, 48, 64)); // pointeur agrandi
-    try testing.expectEqual(@as(i32, 32), cursorSize(0, 32, 32)); // 100 %
-    try testing.expectEqual(@as(i32, 48), cursorSize(-1, 32, 48)); // 150 %
+test "cursorSize : repli sur la taille standard, sans le réglage d'accessibilité" {
+    try testing.expectEqual(@as(i32, 64), cursorSize(0, 64)); // 250 % : palier de 64 px
+    try testing.expectEqual(@as(i32, 32), cursorSize(0, 32)); // 100 %
+    try testing.expectEqual(@as(i32, 48), cursorSize(-1, 48)); // 150 %
 }
 
-test "cursorSize : valeurs absurdes ramenées au défaut, résultat plafonné" {
-    try testing.expectEqual(@as(i32, 64), cursorSize(0, 0, 64)); // réglage illisible -> 32
-    try testing.expectEqual(@as(i32, 64), cursorSize(0, 100_000, 64));
-    try testing.expectEqual(@as(i32, 32), cursorSize(0, 32, 0)); // métrique illisible -> 32
-    try testing.expectEqual(@as(i32, 64), cursorSize(MAX_CUR + 1, 32, 64)); // mesure hors bornes ignorée
-    try testing.expectEqual(@as(i32, MAX_CUR), cursorSize(0, 256, 256)); // plafonné
+test "cursorSize : valeurs absurdes ramenées au défaut" {
+    try testing.expectEqual(@as(i32, 32), cursorSize(0, 0)); // métrique illisible -> 32
+    try testing.expectEqual(@as(i32, 32), cursorSize(0, 100_000));
+    try testing.expectEqual(@as(i32, 64), cursorSize(MAX_CUR + 1, 64)); // mesure hors bornes ignorée
+}
+
+test "displayedSize : le réglage « taille du pointeur » agrandit à l'affichage" {
+    try testing.expectEqual(@as(i32, 48), displayedSize(48, 32)); // taille 1
+    try testing.expectEqual(@as(i32, 120), displayedSize(48, 80)); // taille 4 : mesuré sur Windows 11
+    try testing.expectEqual(@as(i32, 160), displayedSize(64, 80));
+    try testing.expectEqual(@as(i32, 48 * 8), displayedSize(48, 256)); // taille maximale
+    try testing.expectEqual(@as(i32, 48), displayedSize(48, 0)); // réglage illisible -> taille 1
+    try testing.expectEqual(@as(i32, 48), displayedSize(48, 100_000));
 }
 
 test "boxSize : trois quarts du curseur, bornés" {
@@ -395,6 +413,17 @@ pub const RATES = [_]u32{ 3, 5, 10, 20 };
 pub const DEFAULT_RATE = 10;
 pub const STILL_MS = 1000; // après 1 s sans mouvement...
 pub const IDLE_MS = 250; // ...un coup d'œil toutes les 250 ms (jamais plus souvent qu'en mouvement)
+
+/// Après un changement de réglages de Windows (taille du pointeur, écran…), instants (ms
+/// depuis la dernière notification) où AutoCurseur remet ses curseurs. Windows recharge
+/// parfois les siens après sa notification, sans en envoyer d'autre : on attend qu'il ait
+/// fini, puis on repasse deux fois pour être sûr.
+pub const SETTLE_MS = [_]u32{ 500, 1500, 3000 };
+
+test "SETTLE_MS : croissants, le premier laisse à Windows le temps de finir" {
+    try testing.expect(SETTLE_MS[0] >= 300);
+    for (SETTLE_MS[1..], SETTLE_MS[0 .. SETTLE_MS.len - 1]) |b, a| try testing.expect(b > a);
+}
 
 /// Ramène une valeur lue (registre...) à l'un des rythmes proposés, sinon au défaut.
 pub fn validRate(v: u32) u32 {
@@ -582,16 +611,42 @@ pub const RED: u32 = 0xE81123;
 pub const SHAKE_SCALE = 2;
 /// Période de lecture de la position pendant que la souris bouge (ms).
 pub const SHAKE_TICK_MS = 30;
-/// Nombre de demi-tours rapides qui déclenchent l'agrandissement...
-pub const SHAKE_TURNS = 4;
-/// ...s'ils tiennent dans cette durée (ms).
+/// Nombre de demi-tours amples et consécutifs qui déclenchent l'agrandissement
+/// (5 demi-tours = deux allers-retours et demi)...
+pub const SHAKE_TURNS = 5;
+/// ...s'ils tiennent dans cette durée (ms) : il faut secouer à deux allers-retours par
+/// seconde au moins.
 pub const SHAKE_WINDOW_MS = 1000;
+/// Amplitude minimale d'un aller, en tailles de curseur (144 px pour un curseur de 48).
+pub const SHAKE_SEG_FACTOR = 3;
 /// Durée pendant laquelle le curseur reste agrandi après le dernier demi-tour (ms).
 pub const SHAKE_HOLD_MS = 600;
 
 /// Taille du curseur agrandi pour un curseur normal de `px`.
 pub fn bigSize(px: i32) i32 {
     return @min(px * SHAKE_SCALE, MAX_CUR);
+}
+
+/// Taille du curseur rouge à demander quand le pointeur est agrandi par le réglage `base` de
+/// l'accessibilité : le double du curseur normal, sans que Windows l'affiche à plus de 255 px
+/// sur l'écran principal. Au-delà, il le dessine lui-même et le charger coûte cher (0,7 s pour
+/// le jeu rouge à la taille maximale du pointeur, mesuré). Un pointeur déjà énorme ne grossit
+/// donc plus : il devient seulement rouge.
+pub fn bigSizeFor(px: i32, base: u32) i32 {
+    const max_loaded: i32 = @intCast(255 * 32 / pointerBase(base));
+    return @max(px, @min(bigSize(px), max_loaded));
+}
+
+test "bigSizeFor : double tant que l'affichage reste sous 255 px, jamais plus petit que le normal" {
+    try testing.expectEqual(@as(i32, 96), bigSizeFor(48, 32)); // taille 1 : inchangé
+    try testing.expectEqual(@as(i32, 96), bigSizeFor(48, 80)); // affiché 240 px
+    try testing.expectEqual(@as(i32, 63), bigSizeFor(48, 128)); // affiché 252 px au lieu de 384
+    try testing.expectEqual(@as(i32, 48), bigSizeFor(48, 256)); // déjà énorme : seulement rouge
+    for ([_]u32{ 32, 48, 80, 128, 176, 256 }) |b| {
+        const r = bigSizeFor(48, b);
+        try testing.expect(r >= 48 and r <= 96);
+        try testing.expect(r == 48 or displayedSize(r, b) <= 255);
+    }
 }
 
 /// Teinte d'un pixel gris de luminance `l` : rouge pour le noir, blanc pour le blanc,
@@ -625,16 +680,19 @@ pub fn reddenColorPixels(px: []u32, w: usize, mask: []const u8, mask_stride: usi
     }
 }
 
-/// Version rouge 32 bits d'un curseur monochrome de la version noire (masque ET + OU
-/// exclusif de hauteur 2h). Opaque noir -> rouge, opaque blanc -> blanc ; les pixels
-/// transparents et « inverse l'écran » deviennent transparents.
-pub fn monoToRed(mask: []const u8, stride: usize, w: usize, h: usize, out: []u32) void {
-    std.debug.assert(out.len >= w * h and mask.len >= stride * h * 2);
+/// Version rouge 32 bits d'une image monochrome de curseur de la version noire :
+/// `and_bits` (transparence) et `xor_bits` (couleur), lignes de `stride` octets.
+/// `one_is_white` : le bit de couleur 1 désigne le blanc (cas habituel de la palette).
+/// Opaque noir -> rouge, opaque blanc -> blanc ; les pixels transparents et « inverse
+/// l'écran » deviennent transparents.
+pub fn monoToRed(and_bits: []const u8, xor_bits: []const u8, stride: usize, w: usize, h: usize, one_is_white: bool, out: []u32) void {
+    std.debug.assert(out.len >= w * h and and_bits.len >= stride * h and xor_bits.len >= stride * h);
+    const white_bit: u1 = if (one_is_white) 1 else 0;
     for (0..h) |y| {
         for (0..w) |x| {
-            out[y * w + x] = if (maskBit(mask, stride, x, y) == 1)
+            out[y * w + x] = if (maskBit(and_bits, stride, x, y) == 1)
                 0
-            else if (maskBit(mask, stride, x, y + h) == 1)
+            else if (maskBit(xor_bits, stride, x, y) == white_bit)
                 0xFFFFFFFF
             else
                 0xFF000000 | RED;
@@ -655,7 +713,8 @@ const ShakeAxis = struct {
         a.* = .{ .start = v, .ext = v };
     }
 
-    /// Vrai si un demi-tour d'au moins `min_seg` px vient d'avoir lieu.
+    /// Vrai si un demi-tour d'au moins `min_seg` px vient d'avoir lieu. Un aller plus
+    /// court interrompt la série : seuls des allers-retours amples et consécutifs comptent.
     fn feed(a: *ShakeAxis, v: i32, t: u32, min_seg: i32, jitter: i32) bool {
         if (a.dir == 0) {
             if (@abs(v - a.start) > jitter) {
@@ -673,7 +732,11 @@ const ShakeAxis = struct {
         a.start = a.ext;
         a.ext = v;
         a.dir = -a.dir;
-        if (amp < min_seg) return false;
+        if (amp < min_seg) {
+            a.n = 0;
+            a.next = 0;
+            return false;
+        }
         a.turns[a.next] = t;
         a.next = (a.next + 1) % SHAKE_TURNS;
         a.n = @min(a.n + 1, SHAKE_TURNS);
@@ -701,10 +764,10 @@ pub const Shake = struct {
 
     pub const Event = enum { none, start, stop };
 
-    /// L'amplitude minimale d'un aller est le double de la taille du curseur : elle suit
-    /// l'agrandissement de l'écran, et un petit ajustement de visée ne compte pas.
+    /// L'amplitude minimale d'un aller est SHAKE_SEG_FACTOR fois la taille du curseur :
+    /// elle suit l'agrandissement de l'écran, et les gestes vifs du quotidien ne comptent pas.
     pub fn init(cursor_px: i32) Shake {
-        const seg = @max(32, cursor_px * 2);
+        const seg = @max(64, cursor_px * SHAKE_SEG_FACTOR);
         return .{ .min_seg = seg, .jitter = @max(2, @divTrunc(seg, 8)) };
     }
 
@@ -794,41 +857,113 @@ test "reddenColorPixels : sans alpha, le masque ET décide et l'alpha est fabriq
 }
 
 test "monoToRed : noir -> rouge, blanc -> blanc, transparent et « inverse l'écran » -> transparent" {
-    // 4 pixels sur une ligne, stride 2 octets ; ET puis OU exclusif
-    const mask = [_]u8{ 0b0011_0000, 0, 0b0101_0000, 0 };
+    // 4 pixels sur une ligne, stride 2 octets
+    const and_bits = [_]u8{ 0b0011_0000, 0 };
+    const xor_bits = [_]u8{ 0b0101_0000, 0 };
     var out: [4]u32 = undefined;
-    monoToRed(&mask, 2, 4, 1, &out);
+    monoToRed(&and_bits, &xor_bits, 2, 4, 1, true, &out);
     try testing.expectEqual(@as(u32, 0xFF000000 | RED), out[0]); // ET 0, OUX 0 : noir
     try testing.expectEqual(@as(u32, 0xFFFFFFFF), out[1]); // ET 0, OUX 1 : blanc
     try testing.expectEqual(@as(u32, 0), out[2]); // ET 1, OUX 0 : transparent
     try testing.expectEqual(@as(u32, 0), out[3]); // ET 1, OUX 1 : inverse l'écran
 }
 
+test "monoToRed : palette inversée (bit 1 = noir)" {
+    const and_bits = [_]u8{ 0, 0 };
+    const xor_bits = [_]u8{ 0b1000_0000, 0 };
+    var out: [2]u32 = undefined;
+    monoToRed(&and_bits, &xor_bits, 2, 2, 1, false, &out);
+    try testing.expectEqual(@as(u32, 0xFF000000 | RED), out[0]);
+    try testing.expectEqual(@as(u32, 0xFFFFFFFF), out[1]);
+}
+
+/// Donne à `s` les positions x successives `xs`, une toutes les SHAKE_TICK_MS.
+/// Renvoie l'indice de la position qui déclenche, ou null.
+fn feedXs(s: *Shake, xs: []const i32) ?usize {
+    for (xs, 0..) |x, i| {
+        if (s.feed(@intCast(i * SHAKE_TICK_MS), .{ .x = x, .y = 500 }) == .start) return i;
+    }
+    return null;
+}
+
+/// Allers-retours en dents de scie entre `lo` et `hi`, `steps` lectures par aller.
+fn zigzag(buf: []i32, lo: i32, hi: i32, steps: usize, swings: usize) []const i32 {
+    var n: usize = 0;
+    buf[n] = lo;
+    n += 1;
+    for (0..swings) |k| {
+        const from = if (k % 2 == 0) lo else hi;
+        const to = if (k % 2 == 0) hi else lo;
+        for (1..steps + 1) |j| {
+            buf[n] = from + @divTrunc((to - from) * @as(i32, @intCast(j)), @as(i32, @intCast(steps)));
+            n += 1;
+        }
+    }
+    return buf[0..n];
+}
+
 test "Shake : seuils proportionnels à la taille du curseur" {
     const s32 = Shake.init(32);
     const s64 = Shake.init(64);
-    try testing.expectEqual(@as(i32, 64), s32.min_seg);
-    try testing.expectEqual(@as(i32, 128), s64.min_seg);
+    try testing.expectEqual(@as(i32, 96), s32.min_seg);
+    try testing.expectEqual(@as(i32, 192), s64.min_seg);
     try testing.expect(s64.jitter > s32.jitter);
-    try testing.expectEqual(@as(i32, 32), Shake.init(0).min_seg);
+    try testing.expectEqual(@as(i32, 64), Shake.init(0).min_seg);
 }
 
-test "Shake : secouer franchement déclenche en moins d'une seconde, à l'horizontale comme à la verticale" {
+test "Shake : secouer franchement déclenche, à l'horizontale comme à la verticale" {
     for ([_]bool{ false, true }) |vertical| {
-        for ([_]f32{ 2.5, 3, 4, 6 }) |hz| {
+        for ([_]f32{ 3, 4, 6 }) |hz| {
             var s = Shake.init(32);
-            const t = shakeAt(&s, 0, 2000, 400, hz, vertical) orelse return error.PasDeclenche;
-            try testing.expect(t < 1000);
+            const t = shakeAt(&s, 0, 3000, 400, hz, vertical) orelse return error.PasDeclenche;
+            try testing.expect(t < 1500);
             try testing.expect(s.big);
         }
     }
 }
 
+test "Shake : il faut au moins deux allers-retours et demi" {
+    var buf: [64]i32 = undefined;
+    // 5 allers rapides et amples (4 demi-tours) : pas assez
+    var a = Shake.init(64);
+    try testing.expectEqual(@as(?usize, null), feedXs(&a, zigzag(&buf, 500, 1000, 4, 5)));
+    // 6 allers (5 demi-tours) : déclenche
+    var b = Shake.init(64);
+    try testing.expect(feedXs(&b, zigzag(&buf, 500, 1000, 4, 6)) != null);
+}
+
 test "Shake : va-et-vient trop petit ou trop lent : rien" {
-    var small = Shake.init(64); // seuil 128 px
-    try testing.expectEqual(@as(?u32, null), shakeAt(&small, 0, 3000, 100, 4, false));
+    // deux fois la taille du curseur, vite : sous le seuil de trois fois
+    var small = Shake.init(64);
+    try testing.expectEqual(@as(?u32, null), shakeAt(&small, 0, 3000, 2 * 64, 4, false));
+    var small100 = Shake.init(32);
+    try testing.expectEqual(@as(?u32, null), shakeAt(&small100, 0, 3000, 2 * 32, 5, false));
+    // ample mais à un aller-retour et demi par seconde seulement
     var slow = Shake.init(32);
-    try testing.expectEqual(@as(?u32, null), shakeAt(&slow, 0, 5000, 600, 1, false));
+    try testing.expectEqual(@as(?u32, null), shakeAt(&slow, 0, 5000, 600, 1.5, false));
+}
+
+test "Shake : un aller trop court interrompt la série" {
+    var buf: [128]i32 = undefined;
+    var n: usize = 0;
+    // 3 allers amples, un petit retour de 100 px, puis 3 allers amples : jamais 6 demi-tours
+    // amples d'affilée, même si tout tient dans la fenêtre
+    for (zigzag(buf[0..], 500, 1000, 3, 3)) |x| {
+        buf[n] = x;
+        n += 1;
+    }
+    const tail = [_]i32{ 950, 900, 950, 1000 }; // petit aller-retour à droite
+    for (tail) |x| {
+        buf[n] = x;
+        n += 1;
+    }
+    var more: [32]i32 = undefined;
+    for (zigzag(&more, 1000, 500, 3, 4)[1..]) |x| {
+        buf[n] = x;
+        n += 1;
+    }
+    var s = Shake.init(64);
+    try testing.expectEqual(@as(?usize, null), feedXs(&s, buf[0..n]));
 }
 
 test "Shake : déplacements ordinaires, visée avec dépassement et correction : rien" {
@@ -897,7 +1032,7 @@ test "Shake : stop() dit si le curseur était agrandi et remet tout à zéro" {
     _ = shakeAt(&s, 0, 2000, 400, 4, false) orelse return error.PasDeclenche;
     try testing.expect(s.stop());
     try testing.expect(!s.big and !s.started);
-    try testing.expectEqual(@as(i32, 64), s.min_seg);
+    try testing.expectEqual(@as(i32, 96), s.min_seg);
 }
 
 // =====================================================================

@@ -7,11 +7,21 @@ const h = @import("helpers.zig");
 const core = app.core;
 const w = app.win32;
 const cursors = app.cursors;
+const curfile = app.curfile;
 const sampler = app.sampler;
 const testing = std.testing;
 const L = h.L;
 
 const BOX = 60; // zone lue pour un curseur de 80 px (écran à 250 %)
+
+/// Pour les tests qui vérifient les images au pixel près : prévus pour la taille 1 du pointeur
+/// (agrandi dans les Paramètres, Windows charge les images de curseur autrement).
+fn skipIfEnlarged() !void {
+    if (cursors.pointerBase() > 32) {
+        std.debug.print("  pointeur agrandi dans les Paramètres : test prévu pour la taille 1, ignoré\n", .{});
+        return error.SkipZigTest;
+    }
+}
 
 fn setupSampler() void {
     sampler.init();
@@ -45,13 +55,15 @@ test "chaque curseur blanc est l'inverse exact du noir correspondant" {
     for (cursors.black, cursors.white, 0..) |b, wh, i| {
         const sb = try h.stats(b);
         const sw = try h.stats(wh);
-        // mêmes pixels visibles ; les blancs de l'un sont les noirs de l'autre
-        // (tolérance de 2 % pour les pixels d'anticrénelage proches du gris moyen)
-        const expected_white = sb.opaque_px - sb.white_px;
-        const diff = @max(sw.white_px, expected_white) - @min(sw.white_px, expected_white);
-        errdefer std.debug.print("curseur n°{d} : {d} blancs attendus, {d} trouvés sur {d}\n", .{ i, expected_white, sw.white_px, sw.opaque_px });
+        // mêmes pixels visibles ; parmi les gris, les blancs de l'un sont les noirs de l'autre
+        // (les parties colorées, comme le rouge de « indisponible », sont gardées ; tolérance de
+        // 2 % pour les pixels d'anticrénelage proches du gris moyen)
+        const expected_white = sb.gray_px - sb.gray_white_px;
+        const diff = @max(sw.gray_white_px, expected_white) - @min(sw.gray_white_px, expected_white);
+        errdefer std.debug.print("curseur n°{d} : {d} blancs attendus, {d} trouvés sur {d} gris\n", .{ i, expected_white, sw.gray_white_px, sw.gray_px });
         try testing.expectEqual(sb.opaque_px, sw.opaque_px);
-        try testing.expect(diff * 50 <= sb.opaque_px);
+        try testing.expectEqual(sb.gray_px, sw.gray_px);
+        try testing.expect(diff * 50 <= sb.gray_px);
     }
 }
 
@@ -78,7 +90,8 @@ test "noir et blanc ont la même forme et le même point chaud" {
 }
 
 test "contour : la flèche n'a aucun trou aux tailles présentes dans les fichiers de Windows" {
-    // Les fichiers « Windows Black » contiennent des images de 32, 48, 64, 96 et 128 px.
+    // Les fichiers de Windows contiennent des images de 32, 48, 64, 96 et 128 px. La flèche
+    // vient du style blanc (bords adoucis) : son corps ne touche jamais un pixel transparent.
     defer cursors.free();
     for ([_]i32{ 32, 48, 64, 96, 128 }) |size| {
         cursors.load(size);
@@ -88,11 +101,13 @@ test "contour : la flèche n'a aucun trou aux tailles présentes dans les fichie
     }
 }
 
-test "contour : la version blanche a exactement le même contour que la noire" {
+test "contour : aux tailles des fichiers, la version blanche a exactement le même contour que la noire" {
     // (certains fichiers de Windows ont des trous d'origine, comme le « ? » du curseur
-    // d'aide en 32 px : l'inversion doit les reproduire à l'identique, sans en ajouter)
+    // d'aide en 32 px : l'inversion doit les reproduire à l'identique, sans en ajouter).
+    // À une taille absente des fichiers, chaque fichier est étiré séparément par Windows,
+    // et cet étirement n'est pas symétrique entre noir et blanc : pas de comparaison.
     defer cursors.free();
-    for ([_]i32{ 32, 48, 64, 80, 96, 128 }) |size| {
+    for ([_]i32{ 32, 48, 64, 96, 128 }) |size| {
         cursors.load(size);
         for (cursors.black, cursors.white, 0..) |b, wh, i| {
             const gb = (try h.outlineGaps(b, false)) orelse continue;
@@ -105,33 +120,161 @@ test "contour : la version blanche a exactement le même contour que la noire" {
 
 test "diagnostic : à une taille absente des fichiers (80 px), Windows abîme le contour" {
     // Ce test documente pourquoi la taille doit être celle de Windows : redimensionner
-    // une image monochrome casse son contour d'un pixel.
+    // une image monochrome casse son contour d'un pixel (ici, les curseurs « Windows Black »).
     defer cursors.free();
     cursors.load(80);
-    const gaps = (try h.outlineGaps(cursors.black[0], false)).?;
-    std.debug.print("  flèche à 80 px : {d} trous dans le contour\n", .{gaps});
-    try testing.expect(gaps > 0);
+    var total: usize = 0;
+    for (cursors.black, 0..) |b, i| {
+        if (!(try h.stats(b)).mono) continue;
+        const gaps = (try h.outlineGaps(b, false)).?;
+        std.debug.print("  curseur {d} (1 bit) à 80 px : {d} trous dans le contour\n", .{ cursors.defs[i].id, gaps });
+        total += gaps;
+    }
+    try testing.expect(total > 0);
 }
 
-test "inverser deux fois redonne exactement le curseur d'origine" {
-    defer cursors.free();
-    cursors.load(48);
-    for (cursors.black) |b| {
-        const once = cursors.invert(b) orelse return error.Invert;
-        defer _ = w.DestroyCursor(once);
-        const twice = cursors.invert(once) orelse return error.Invert;
-        defer _ = w.DestroyCursor(twice);
-        try testing.expect((try h.stats(b)).sameImage(try h.stats(twice)));
+// ---------------------------------------------------------------------
+// Fichiers .cur fabriqués
+// ---------------------------------------------------------------------
+
+/// Contenu du fichier de Windows du curseur `i` (à libérer avec testing.allocator).
+fn windowsFile(i: usize) ![]u8 {
+    var buf: [2 * w.MAX_PATH]u16 = undefined;
+    var wd: [w.MAX_PATH]u16 = undefined;
+    const n = w.GetWindowsDirectoryW(&wd, wd.len);
+    const path = core.join(&buf, &.{ wd[0..n], L("\\Cursors\\"), cursors.defs[i].file });
+    return h.readFile(path.ptr);
+}
+
+fn frameSizes(file: []const u8, out: []usize) []usize {
+    const n = curfile.frameCount(file) orelse return out[0..0];
+    var k: usize = 0;
+    for (0..n) |i| {
+        if (curfile.frame(file, i)) |f| {
+            out[k] = f.w;
+            k += 1;
+        }
+    }
+    std.mem.sort(usize, out[0..k], {}, std.sort.asc(usize));
+    return out[0..k];
+}
+
+test "fichiers de Windows : versions inversée et rouge avec toutes les tailles, de 32 à 128 px" {
+    for (0..cursors.COUNT) |i| {
+        const src = try windowsFile(i);
+        defer testing.allocator.free(src);
+        var a: [16]usize = undefined;
+        const sizes = frameSizes(src, &a);
+        try testing.expect(std.mem.indexOfScalar(usize, sizes, 32) != null);
+        try testing.expect(std.mem.indexOfScalar(usize, sizes, 128) != null);
+        for ([_]curfile.Op{ .invert, .red, .invert_red }) |op| {
+            const len = curfile.derive(src, op, &cursors.out_buf) orelse return error.Derive;
+            var b: [16]usize = undefined;
+            try testing.expectEqualSlices(usize, sizes, frameSizes(cursors.out_buf[0..len], &b));
+            try testing.expect(len <= cursors.out_buf.len);
+        }
     }
 }
 
-test "inverser ne modifie pas le curseur source" {
+test "fichiers de Windows : inverser deux fois redonne exactement les images d'origine" {
+    const copy = try testing.allocator.alignedAlloc(u8, .@"4", cursors.out_buf.len);
+    defer testing.allocator.free(copy);
+    const once = try testing.allocator.alignedAlloc(u8, .@"4", cursors.out_buf.len);
+    defer testing.allocator.free(once);
+    for (0..cursors.COUNT) |i| {
+        const src = try windowsFile(i);
+        defer testing.allocator.free(src);
+        const c = curfile.derive(src, .copy, copy).?;
+        const o = curfile.derive(src, .invert, once).?;
+        const t = curfile.derive(once[0..o], .invert, &cursors.out_buf).?;
+        try testing.expectEqualSlices(u8, copy[0..c], cursors.out_buf[0..t]);
+    }
+}
+
+extern "kernel32" fn RemoveDirectoryW([*:0]const u16) callconv(.winapi) w.BOOL;
+
+test "fichiers fabriqués : écrits une fois, pas réécrits s'ils sont à jour, réécrits s'ils sont abîmés" {
+    var name_buf: [64]u16 = undefined;
+    var num: [16]u8 = undefined;
+    const tag = try std.fmt.bufPrint(&num, "{d}", .{w.GetTickCount()});
+    var n: usize = 0;
+    for (L("AutoCurseur-tests\\")) |c| {
+        name_buf[n] = c;
+        n += 1;
+    }
+    for (tag) |c| {
+        name_buf[n] = c;
+        n += 1;
+    }
+    try testing.expect(cursors.setDir(L("TEMP"), name_buf[0..n]));
+    defer {
+        // ménage : fichiers puis dossier, et retour au dossier de l'application
+        var p: [2 * w.MAX_PATH]u16 = undefined;
+        for (0..cursors.COUNT) |i| {
+            for ([_]cursors.Set{ .black, .white, .red }) |set| {
+                if (cursors.pathOf(set, i, &p)) |path| {
+                    if (std.mem.startsWith(u16, path, cursors.dirPath())) _ = w.DeleteFileW(path.ptr);
+                }
+            }
+        }
+        var d: [w.MAX_PATH]u16 = undefined;
+        const dp = cursors.dirPath();
+        @memcpy(d[0..dp.len], dp);
+        d[dp.len] = 0;
+        _ = RemoveDirectoryW(@ptrCast(&d));
+        _ = cursors.useDefaultDir();
+    }
+
+    // fichier laissé par une version précédente (flèche « Windows Black » inversée)
+    var old_buf: [2 * w.MAX_PATH]u16 = undefined;
+    const old = core.join(&old_buf, &.{ cursors.dirPath(), L("blanc-arrow_r.cur") });
+    const oh = w.CreateFileW(old.ptr, w.GENERIC_WRITE, 0, null, w.CREATE_ALWAYS, w.FILE_ATTRIBUTE_NORMAL, null);
+    try testing.expect(oh != w.INVALID_HANDLE_VALUE);
+    _ = w.CloseHandle(oh);
+
+    // 17 versions inversées (noires pour le style blanc, blanches pour « Windows Black ») + 17 rouges
+    try testing.expectEqual(@as(usize, 2 * cursors.COUNT), cursors.prepare(true));
+    // l'ancien fichier a été supprimé avec l'écriture des nouveaux
+    try testing.expectEqual(w.INVALID_FILE_ATTRIBUTES, w.GetFileAttributesW(old.ptr));
+    try testing.expectEqual(@as(usize, 0), cursors.prepare(true));
+    for (0..cursors.COUNT) |i| {
+        var p: [2 * w.MAX_PATH]u16 = undefined;
+        try testing.expect(cursors.pathOf(.white, i, &p) != null);
+        try testing.expect(cursors.pathOf(.red, i, &p) != null);
+    }
+
+    // un fichier abîmé (tronqué) est réécrit, et seulement lui : celui fabriqué pour la flèche,
+    // jamais le fichier de Windows
+    var p: [2 * w.MAX_PATH]u16 = undefined;
+    const made: cursors.Set = if (cursors.defs[0].file_is_white) .black else .white;
+    const arrow_made = cursors.pathOf(made, 0, &p).?;
+    try testing.expect(std.mem.startsWith(u16, arrow_made, cursors.dirPath()));
+    const fh = w.CreateFileW(arrow_made.ptr, w.GENERIC_WRITE, 0, null, w.CREATE_ALWAYS, w.FILE_ATTRIBUTE_NORMAL, null);
+    try testing.expect(fh != w.INVALID_HANDLE_VALUE);
+    _ = w.CloseHandle(fh);
+    try testing.expectEqual(@as(usize, 1), cursors.prepare(true));
+
+    // les curseurs se chargent depuis ces fichiers, à toutes les tailles
+    for ([_]i32{ 32, 48, 64, 96, 128 }) |px| {
+        const c = cursors.loadOne(made, 0, px) orelse return error.Chargement;
+        defer _ = w.DestroyCursor(c);
+        try testing.expectEqual(px, (try h.stats(c)).width);
+    }
+}
+
+test "fichiers fabriqués : à chaque taille native, l'image blanche 1 bit est l'inverse exact de la noire" {
     defer cursors.free();
-    cursors.load(48);
-    const before = try h.stats(cursors.black[0]);
-    const inv = cursors.invert(cursors.black[0]) orelse return error.Invert;
-    defer _ = w.DestroyCursor(inv);
-    try testing.expect(before.sameImage(try h.stats(cursors.black[0])));
+    for ([_]i32{ 32, 48, 64, 96, 128 }) |px| {
+        cursors.load(px);
+        for (cursors.black, cursors.white) |b, wh| {
+            const sb = try h.stats(b.?);
+            const sw = try h.stats(wh.?);
+            if (!sb.mono) continue; // mains en 32 bits : voir le test de l'inverse exact plus haut
+            try testing.expectEqual(sb.width, px);
+            try testing.expectEqual(sb.opaque_px, sw.opaque_px);
+            try testing.expectEqual(sb.white_px, sw.opaque_px - sw.white_px);
+        }
+    }
 }
 
 test "recharger plusieurs fois ne perd rien (pas de fuite visible de curseurs)" {
@@ -139,6 +282,25 @@ test "recharger plusieurs fois ne perd rien (pas de fuite visible de curseurs)" 
     var i: u32 = 0;
     while (i < 30) : (i += 1) cursors.load(if (i % 2 == 0) 32 else 80);
     for (cursors.black, cursors.white) |b, wh| try testing.expect(b != null and wh != null);
+}
+
+test "curseur affiché : chaque curseur du système est reconnu à sa poignée, les autres non" {
+    for (cursors.defs, 0..) |d, i| {
+        try testing.expectEqual(@as(?usize, i), cursors.indexOf(w.LoadCursorW(null, @ptrFromInt(d.id))));
+    }
+    // un curseur chargé par un programme (même depuis un fichier de Windows) n'en est pas un
+    defer cursors.free();
+    cursors.load(32);
+    for (cursors.black) |c| try testing.expectEqual(@as(?usize, null), cursors.indexOf(c));
+    try testing.expectEqual(@as(?usize, null), cursors.indexOf(null));
+}
+
+test "curseur affiché : sans couleur voulue, fix et forget ne touchent à rien" {
+    try testing.expectEqual(@as(?cursors.Set, null), cursors.wanted);
+    cursors.fix(); // ne doit rien installer
+    for (cursors.installed) |s| try testing.expectEqual(@as(?cursors.Set, null), s);
+    cursors.forget();
+    for (cursors.installed) |s| try testing.expectEqual(@as(?cursors.Set, null), s);
 }
 
 test "la taille choisie est exactement celle des curseurs de Windows" {
@@ -376,6 +538,7 @@ test "redimensionner la zone lue plusieurs fois reste cohérent" {
 // ---------------------------------------------------------------------
 
 test "jeu rouge : les 17 curseurs, deux fois plus grands, avec du rouge, à plusieurs tailles" {
+    try skipIfEnlarged();
     h.dpiAware();
     defer cursors.freeRed();
     for ([_]i32{ 32, 48, 64, 96, 128 }) |px| {
@@ -394,6 +557,7 @@ test "jeu rouge : les 17 curseurs, deux fois plus grands, avec du rouge, à plus
 }
 
 test "jeu rouge : la flèche est la noire agrandie, corps rouge, contour blanc sans trou" {
+    try skipIfEnlarged();
     h.dpiAware();
     defer cursors.free();
     defer cursors.freeRed();
@@ -406,7 +570,11 @@ test "jeu rouge : la flèche est la noire agrandie, corps rouge, contour blanc s
         try testing.expectEqual(b.hot_x, r.hot_x);
         try testing.expectEqual(b.hot_y, r.hot_y);
         try testing.expectEqual(b.opaque_px, r.opaque_px); // même dessin
-        try testing.expectEqual(b.opaque_px - b.white_px, r.red_px); // le noir, et lui seul, devient rouge
+        // le noir, et lui seul, devient rouge (les pixels gris foncés des bords adoucis
+        // deviennent d'un rouge plus pâle : 10 % de tolérance ; 93 % mesurés à 48 px)
+        const dark = b.opaque_px - b.white_px;
+        errdefer std.debug.print("  à {d} px : {d} pixels noirs, {d} rouges\n", .{ px, dark, r.red_px });
+        try testing.expect(r.red_px <= dark and r.red_px * 100 >= dark * 90);
         try testing.expectEqual(@as(usize, 0), r.gaps);
     }
 }
@@ -454,4 +622,221 @@ test "jeux noir et blanc : charger et libérer 20 fois ne fait fuir aucun objet 
     for (0..20) |_| cursors.load(48);
     cursors.free();
     try testing.expectEqual(before, h.guiObjects());
+}
+
+// ---------------------------------------------------------------------
+// Curseurs dessinés à partir des dessins vectoriels de Windows 11 (pointeur agrandi)
+// ---------------------------------------------------------------------
+
+const svgcur = app.svgcur;
+
+fn skipWithoutVectorShapes() !void {
+    if (!cursors.hasVectorShapes()) {
+        std.debug.print("  pas de dessins vectoriels de curseurs (Windows 10 ?) : test ignoré\n", .{});
+        return error.SkipZigTest;
+    }
+}
+
+/// Contenu du fichier vectoriel du jeu `set` pour le curseur `i` (à libérer).
+fn vectorFile(set: cursors.Set, i: usize) ![]u8 {
+    var buf: [2 * w.MAX_PATH]u16 = undefined;
+    const was = cursors.usingVector();
+    cursors.useVector(true);
+    defer cursors.useVector(was);
+    const path = cursors.pathOf(set, i, &buf) orelse return error.FichierAbsent;
+    return h.readFile(path.ptr);
+}
+
+/// Pixel (x, y) visible (de haut en bas) dans l'image `f` d'un fichier de curseur.
+fn visibleAt(f: curfile.Frame, x: usize, y: usize) bool {
+    const row = f.h - 1 - y; // lignes de bas en haut
+    const ms = curfile.stride(f.w, 1);
+    if (f.bpp == 32) return std.mem.readInt(u32, f.xor_bits[(row * f.w + x) * 4 ..][0..4], .little) >> 24 != 0;
+    const a = core.maskBit(f.and_bits, ms, x, row);
+    const c = core.maskBit(f.xor_bits, ms, x, row);
+    return !(a == 1 and c == 0);
+}
+
+test "dessins vectoriels : les 17 curseurs noirs, blancs et rouges, en 240 x 240" {
+    try skipWithoutVectorShapes();
+    _ = cursors.prepareVector(true);
+    try testing.expect(cursors.vectorReady());
+    for (0..cursors.COUNT) |i| {
+        for ([_]cursors.Set{ .black, .white, .red }) |set| {
+            const file = try vectorFile(set, i);
+            defer testing.allocator.free(file);
+            try testing.expectEqual(@as(?usize, 1), curfile.frameCount(file));
+            const f = curfile.frame(file, 0) orelse return error.ImageIllisible;
+            try testing.expectEqual(@as(usize, svgcur.SIZE), f.w);
+            try testing.expectEqual(@as(u16, if (set == .red) 32 else 1), f.bpp);
+            try testing.expectEqual(svgcur.shapes[i].hot_x, f.hot_x);
+            try testing.expectEqual(svgcur.shapes[i].hot_y, f.hot_y);
+        }
+    }
+}
+
+test "dessins vectoriels : même forme et mêmes points chauds que les curseurs agrandis de Windows" {
+    try skipWithoutVectorShapes();
+    _ = cursors.prepareVector(false);
+    var env: [w.MAX_PATH]u16 = undefined;
+    const n = w.GetEnvironmentVariableW(L("LOCALAPPDATA"), &env, env.len);
+    var compared: usize = 0;
+    for (svgcur.shapes, 0..) |sh, i| {
+        var pbuf: [2 * w.MAX_PATH]u16 = undefined;
+        const p = core.join(&pbuf, &.{ env[0..n], L("\\Microsoft\\Windows\\Cursors\\"), sh.name, L("_eoa.cur") });
+        const theirs = h.readFile(p.ptr) catch continue; // Windows ne les écrit qu'après un réglage
+        defer testing.allocator.free(theirs);
+        const ours = try vectorFile(.black, i);
+        defer testing.allocator.free(ours);
+        const a = curfile.frame(theirs, 0) orelse continue;
+        const b = curfile.frame(ours, 0).?;
+        if (a.w != b.w) continue;
+        var visible: usize = 0;
+        var diff: usize = 0;
+        for (0..a.w) |y| {
+            for (0..a.w) |x| {
+                const va = visibleAt(a, x, y);
+                if (va) visible += 1;
+                if (va != visibleAt(b, x, y)) diff += 1;
+            }
+        }
+        std.debug.print("  {f} : {d} pixels de différence sur {d}, point chaud {d},{d} (Windows {d},{d})\n", .{
+            std.unicode.fmtUtf16Le(sh.name), diff, visible, b.hot_x, b.hot_y, a.hot_x, a.hot_y,
+        });
+        try testing.expectEqual(a.hot_x, b.hot_x);
+        try testing.expectEqual(a.hot_y, b.hot_y);
+        try testing.expect(diff * 100 <= visible * 2); // moins de 2 % : bords seulement
+        compared += 1;
+    }
+    if (compared == 0) {
+        std.debug.print("  aucun curseur agrandi de Windows à comparer : test ignoré\n", .{});
+        return error.SkipZigTest;
+    }
+}
+
+test "dessins vectoriels : le blanc est l'inverse exact du noir" {
+    try skipWithoutVectorShapes();
+    _ = cursors.prepareVector(false);
+    for (0..cursors.COUNT) |i| {
+        const black = try vectorFile(.black, i);
+        defer testing.allocator.free(black);
+        const white = try vectorFile(.white, i);
+        defer testing.allocator.free(white);
+        const b = curfile.frame(black, 0).?;
+        const wh = curfile.frame(white, 0).?;
+        try testing.expectEqualSlices(u8, b.and_bits, wh.and_bits);
+        for (b.xor_bits, wh.xor_bits, b.and_bits) |x0, x1, m| try testing.expectEqual(x0 ^ ~m, x1);
+    }
+}
+
+test "dessins vectoriels : le rouge a le corps rouge, le contour blanc et des bords adoucis" {
+    try skipWithoutVectorShapes();
+    _ = cursors.prepareVector(true);
+    const file = try vectorFile(.red, 0);
+    defer testing.allocator.free(file);
+    const f = curfile.frame(file, 0).?;
+    var red: usize = 0;
+    var white: usize = 0;
+    var soft: usize = 0;
+    for (0..f.w * f.h) |k| {
+        const c = std.mem.readInt(u32, f.xor_bits[k * 4 ..][0..4], .little);
+        const a = c >> 24;
+        if (a == 0) continue;
+        if (a < 255) soft += 1;
+        if (c & 0xFFFFFF == core.RED) red += 1;
+        if (c & 0xFFFFFF == 0xFFFFFF) white += 1;
+    }
+    try testing.expect(red > white); // la flèche : corps plus grand que son contour
+    try testing.expect(white > 0);
+    try testing.expect(soft > 0);
+}
+
+test "dessins vectoriels : les curseurs se chargent à toutes les tailles depuis leur image de 240" {
+    try skipWithoutVectorShapes();
+    _ = cursors.prepareVector(true);
+    cursors.useVector(true);
+    defer cursors.useVector(false);
+    h.dpiAware();
+    for ([_]i32{ 48, 120, 240 }) |px| {
+        const c = cursors.loadOne(.black, 0, px) orelse return error.Chargement;
+        defer _ = w.DestroyCursor(c);
+        try testing.expectEqual(px, (try h.stats(c)).width);
+        const r = cursors.loadOne(.red, 0, px) orelse return error.Chargement;
+        defer _ = w.DestroyCursor(r);
+        try testing.expect((try h.redStats(r)).red_px > 0);
+    }
+}
+
+test "dessins vectoriels : déjà prêts, rien n'est réécrit, et Direct2D est déchargé ensuite" {
+    try skipWithoutVectorShapes();
+    _ = cursors.prepareVector(true);
+    try testing.expect(cursors.useDefaultDir()); // oublie l'état : tout est revérifié
+    try testing.expectEqual(@as(usize, 0), cursors.prepareVector(true));
+    try testing.expect(w.GetModuleHandleW(L("d2d1.dll")) == null);
+}
+
+// ---------------------------------------------------------------------
+// Fil de lecture de l'écran
+// ---------------------------------------------------------------------
+
+const WM_TEST_SAMPLE = w.WM_APP + 7;
+extern "user32" fn PeekMessageW(*w.MSG, w.HWND, u32, u32, u32) callconv(.winapi) w.BOOL;
+const PM_REMOVE = 1;
+
+/// Fenêtre « message seulement » qui reçoit les résultats du fil de lecture.
+fn messageWindow() !w.HWND {
+    const hi = w.GetModuleHandleW(null);
+    const wc: w.WNDCLASSW = .{ .lpfnWndProc = w.DefWindowProcW, .hInstance = hi, .lpszClassName = L("AutoCurseurTestLecture") };
+    _ = w.RegisterClassW(&wc);
+    const HWND_MESSAGE: w.HWND = @ptrFromInt(@as(usize, @bitCast(@as(isize, -3))));
+    return w.CreateWindowExW(0, L("AutoCurseurTestLecture"), L(""), 0, 0, 0, 0, 0, HWND_MESSAGE, null, hi, null) orelse error.Fenetre;
+}
+
+/// Résultats reçus pendant `ms` millisecondes (on s'arrête au premier si `first`).
+fn collect(hwnd: w.HWND, ms: u32, first: bool, out: *std.ArrayList(usize)) !void {
+    const t0 = w.GetTickCount();
+    while (w.GetTickCount() -% t0 < ms) {
+        var m: w.MSG = undefined;
+        while (PeekMessageW(&m, hwnd, WM_TEST_SAMPLE, WM_TEST_SAMPLE, PM_REMOVE) != 0) {
+            try out.append(testing.allocator, m.wParam);
+            if (first) return;
+        }
+        w.Sleep(5);
+    }
+}
+
+test "fil de lecture : répond, ne garde que la dernière demande, s'arrête proprement" {
+    h.dpiAware();
+    sampler.deinit(); // le fil crée lui-même son DC de travail
+    const hwnd = try messageWindow();
+    defer _ = w.DestroyWindow(hwnd);
+    try testing.expect(sampler.startWorker(hwnd, WM_TEST_SAMPLE));
+    var got: std.ArrayList(usize) = .empty;
+    defer got.deinit(testing.allocator);
+
+    // une demande : une réponse, une luminance valide
+    var p: core.Point = .{};
+    _ = w.GetCursorPos(&p);
+    sampler.request(p, 48);
+    try collect(hwnd, 3000, true, &got);
+    try testing.expectEqual(@as(usize, 1), got.items.len);
+    try testing.expect(got.items[0] == sampler.NO_RESULT or got.items[0] <= 255);
+
+    // 50 demandes d'affilée : jamais plus de réponses que de demandes, et au moins une
+    got.clearRetainingCapacity();
+    const before = @atomicLoad(u32, &sampler.reads, .seq_cst);
+    for (0..50) |i| sampler.request(.{ .x = p.x + @as(i32, @intCast(i % 7)), .y = p.y }, 48);
+    try collect(hwnd, 1500, false, &got);
+    const reads = @atomicLoad(u32, &sampler.reads, .seq_cst) - before;
+    std.debug.print("  50 demandes d'affilée : {d} lectures, {d} réponses\n", .{ reads, got.items.len });
+    try testing.expect(got.items.len >= 1 and got.items.len <= 50);
+    try testing.expectEqual(@as(usize, reads), got.items.len);
+
+    // arrêt : le fil se termine ; une demande se fait ensuite sur place
+    sampler.stopWorker(3000);
+    got.clearRetainingCapacity();
+    sampler.request(p, 48);
+    try collect(hwnd, 1000, true, &got);
+    try testing.expectEqual(@as(usize, 1), got.items.len);
+    sampler.deinit();
 }
