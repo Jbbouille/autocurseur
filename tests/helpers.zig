@@ -407,3 +407,102 @@ pub fn distinctDpis(ms: []const Monitor) usize {
     }
     return n;
 }
+
+// ---------------------------------------------------------------------
+// Couleurs des curseurs et dossiers de test
+// ---------------------------------------------------------------------
+
+/// Nombre de pixels bien visibles du curseur `c` qui ont exactement la couleur `rgb` (0xRRGGBB).
+/// Curseur monochrome : seuls le noir et le blanc existent.
+pub fn colorCount(c: w.HCURSOR, rgb: u32) !usize {
+    return colorNear(c, rgb, 0);
+}
+
+/// Nombre de pixels bien visibles du curseur `c` dont la couleur est à `tol` au plus de `rgb`
+/// (core.colorDistance) : le contour des curseurs de Windows n'est pas toujours d'un noir pur.
+pub fn colorNear(c: w.HCURSOR, rgb: u32, tol: u32) !usize {
+    var ii: w.ICONINFO = undefined;
+    if (w.GetIconInfo(c, &ii) == 0) return error.GetIconInfo;
+    defer _ = w.DeleteObject(ii.hbmMask);
+    const color = ii.hbmColor orelse {
+        const s = try stats(c);
+        return if (rgb == 0xFFFFFF) s.white_px else if (rgb == 0) s.opaque_px - s.white_px else 0;
+    };
+    defer _ = w.DeleteObject(color);
+    var bm: w.BITMAP = undefined;
+    _ = w.GetObjectW(color, @sizeOf(w.BITMAP), &bm);
+    const width: usize = @intCast(bm.bmWidth);
+    const height: usize = @intCast(bm.bmHeight);
+    const px = try testing.allocator.alloc(u32, width * height);
+    defer testing.allocator.free(px);
+    var bi = w.bmi(bm.bmWidth, bm.bmHeight);
+    const dc = w.GetDC(null);
+    defer _ = w.ReleaseDC(null, dc);
+    if (w.GetDIBits(dc, color, 0, @intCast(height), @ptrCast(px.ptr), &bi, w.DIB_RGB_COLORS) == 0) return error.GetDIBits;
+    var mbm: w.BITMAP = undefined;
+    _ = w.GetObjectW(ii.hbmMask, @sizeOf(w.BITMAP), &mbm);
+    const stride: usize = @intCast(mbm.bmWidthBytes);
+    const mask = try testing.allocator.alloc(u8, stride * @as(usize, @intCast(mbm.bmHeight)));
+    defer testing.allocator.free(mask);
+    _ = w.GetBitmapBits(ii.hbmMask, @intCast(mask.len), @ptrCast(mask.ptr));
+    const has_alpha = for (px) |p| {
+        if (p >> 24 != 0) break true;
+    } else false;
+    var n: usize = 0;
+    for (px, 0..) |p, i| {
+        const visible = if (has_alpha) (p >> 24) > 128 else core.maskBit(mask, stride, i % width, i / width) == 0;
+        if (visible and core.colorDistance(p & 0xFFFFFF, rgb) <= tol) n += 1;
+    }
+    return n;
+}
+
+const WIN32_FIND_DATAW = extern struct {
+    attrs: u32,
+    times: [6]u32,
+    size_high: u32,
+    size_low: u32,
+    reserved: [2]u32,
+    name: [260]u16,
+    alt_name: [14]u16,
+};
+comptime {
+    if (@sizeOf(WIN32_FIND_DATAW) != 592) @compileError("WIN32_FIND_DATAW mal aligné");
+}
+extern "kernel32" fn FindFirstFileW([*:0]const u16, *WIN32_FIND_DATAW) callconv(.winapi) w.HANDLE;
+extern "kernel32" fn FindNextFileW(w.HANDLE, *WIN32_FIND_DATAW) callconv(.winapi) w.BOOL;
+extern "kernel32" fn FindClose(w.HANDLE) callconv(.winapi) w.BOOL;
+extern "kernel32" fn RemoveDirectoryW([*:0]const u16) callconv(.winapi) w.BOOL;
+const FILE_ATTRIBUTE_DIRECTORY = 0x10;
+
+/// Nombre de fichiers du dossier `dir` (terminé par « \ ») ; ils sont supprimés si `remove`.
+fn walkDir(dir: []const u16, remove: bool) usize {
+    var pat: [2 * w.MAX_PATH]u16 = undefined;
+    var fd: WIN32_FIND_DATAW = undefined;
+    const f = FindFirstFileW(core.join(&pat, &.{ dir, L("*") }).ptr, &fd);
+    if (f == w.INVALID_HANDLE_VALUE) return 0;
+    defer _ = FindClose(f);
+    var n: usize = 0;
+    while (true) {
+        if (fd.attrs & FILE_ATTRIBUTE_DIRECTORY == 0) {
+            n += 1;
+            if (remove) {
+                var p: [2 * w.MAX_PATH]u16 = undefined;
+                _ = w.DeleteFileW(core.join(&p, &.{ dir, std.mem.sliceTo(&fd.name, 0) }).ptr);
+            }
+        }
+        if (FindNextFileW(f, &fd) == 0) break;
+    }
+    return n;
+}
+
+/// Nombre de fichiers du dossier `dir` (terminé par « \ »).
+pub fn fileCount(dir: []const u16) usize {
+    return walkDir(dir, false);
+}
+
+/// Supprime les fichiers du dossier `dir` (terminé par « \ »), puis le dossier.
+pub fn removeDir(dir: []const u16) void {
+    _ = walkDir(dir, true);
+    var d: [w.MAX_PATH]u16 = undefined;
+    _ = RemoveDirectoryW(core.join(&d, &.{dir}).ptr);
+}

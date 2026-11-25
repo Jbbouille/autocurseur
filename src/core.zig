@@ -6,6 +6,7 @@
 //! - `sampleOrigin`: position de la zone lue à l'écran
 //! - `Ticker`      : rythme de la minuterie (rapide quand la souris bouge, lent sinon)
 //! - `Shake`       : détection d'une souris secouée, et version rouge agrandie des curseurs
+//! - `Colors`      : couleurs choisies pour les deux jeux, seuils et teinte qui en découlent
 
 const std = @import("std");
 const testing = std.testing;
@@ -39,7 +40,7 @@ pub const Thresholds = struct {
 pub fn decide(current: Shade, l: u32, t: Thresholds) Shade {
     if (current != .black and l >= t.to_black) return .black;
     if (current != .white and l <= t.to_white) return .white;
-    if (current == .unknown) return if (l >= 128) .black else .white;
+    if (current == .unknown) return if (2 * l > t.to_black + t.to_white) .black else .white;
     return current;
 }
 
@@ -338,6 +339,27 @@ pub fn displayedSize(cursor_px: i32, base: u32) i32 {
     return @divTrunc(cursor_px * @as(i32, @intCast(pointerBase(base))), 32);
 }
 
+/// Coin haut-gauche d'une fenêtre de `w` x `h` centrée sur le point `p`, sans sortir de la
+/// zone `area` (si elle est plus grande que la zone, son coin haut-gauche reste visible).
+pub fn placeNear(p: Point, w: i32, h: i32, area: Rect) Point {
+    return .{
+        .x = @max(area.x, @min(p.x - @divTrunc(w, 2), area.x + area.w - w)),
+        .y = @max(area.y, @min(p.y - @divTrunc(h, 2), area.y + area.h - h)),
+    };
+}
+
+test "placeNear : centrée sur la souris, ramenée dans l'écran près des bords" {
+    const area: Rect = .{ .x = 3840, .y = 459, .w = 3840, .h = 2100 }; // second écran
+    // au milieu : centrée
+    try testing.expectEqual(Point{ .x = 5000 - 300, .y = 1500 - 200 }, placeNear(.{ .x = 5000, .y = 1500 }, 600, 400, area));
+    // près de la zone de notification (en bas à droite) : collée aux bords
+    try testing.expectEqual(Point{ .x = 3840 + 3840 - 600, .y = 459 + 2100 - 400 }, placeNear(.{ .x = 7670, .y = 2550 }, 600, 400, area));
+    // en haut à gauche
+    try testing.expectEqual(Point{ .x = 3840, .y = 459 }, placeNear(.{ .x = 3841, .y = 460 }, 600, 400, area));
+    // plus grande que la zone : le coin haut-gauche reste visible
+    try testing.expectEqual(Point{ .x = 3840, .y = 459 }, placeNear(.{ .x = 5000, .y = 1500 }, 5000, 3000, area));
+}
+
 /// Côté de la zone lue : les trois quarts du curseur, borné.
 pub fn boxSize(cursor_px: i32) i32 {
     return std.math.clamp(@divTrunc(cursor_px * 3, 4), BOX_MIN, BOX_MAX);
@@ -600,6 +622,272 @@ test "Ticker : budget souris en mouvement, exactement le rythme choisi" {
 }
 
 // =====================================================================
+// Couleurs des deux jeux de curseurs
+// =====================================================================
+
+pub const BLACK: u32 = 0x000000;
+pub const WHITE: u32 = 0xFFFFFF;
+
+/// Couleurs du corps des curseurs (0xRRGGBB) : `dark` sur les fonds clairs, `light` sur les
+/// fonds sombres. Le contour garde la couleur opposée : blanc autour de `dark`, noir autour
+/// de `light`.
+pub const Colors = struct {
+    dark: u32 = BLACK,
+    light: u32 = WHITE,
+
+    pub fn eql(a: Colors, b: Colors) bool {
+        return a.dark == b.dark and a.light == b.light;
+    }
+};
+
+/// Écart de luminance minimal entre les deux couleurs. Juste avant de changer de couleur, le
+/// curseur diffère du fond de la moitié de cet écart moins 22,5 : au moins 52 points.
+pub const MIN_LUMA_GAP = 150;
+/// Largeur de la bande où la couleur ne change pas (hystérésis) : 22,5 de chaque côté du milieu.
+const DEAD_BAND = 45;
+
+/// Les deux couleurs conviennent-elles : une sombre et une claire, assez éloignées ?
+pub fn validColors(c: Colors) bool {
+    return c.dark <= WHITE and c.light <= WHITE and luma(c.light) >= luma(c.dark) + MIN_LUMA_GAP;
+}
+
+/// Seuils de bascule pour ces couleurs : le milieu de leurs luminances, à 22,5 près de chaque
+/// côté. Pour le noir et le blanc : 150 et 105.
+pub fn thresholdsFor(c: Colors) Thresholds {
+    const sum = luma(c.dark) + luma(c.light);
+    return .{ .to_black = (sum + DEAD_BAND) / 2, .to_white = (sum -| DEAD_BAND) / 2 };
+}
+
+/// Couples proposés dans le menu ; le premier est celui par défaut.
+pub const PRESETS = [_]Colors{
+    .{}, // noir / blanc
+    .{ .dark = 0x00205B, .light = 0xFFE600 }, // bleu nuit / jaune
+    .{ .dark = 0x004B23, .light = 0xB7F5B0 }, // vert sapin / vert clair
+    .{ .dark = 0x4B0082, .light = 0xFFC1E3 }, // violet / rose
+};
+
+/// Rang du couple `c` dans PRESETS, ou null si c'est un couple personnalisé.
+pub fn presetIndex(c: Colors) ?usize {
+    for (PRESETS, 0..) |p, i| {
+        if (p.eql(c)) return i;
+    }
+    return null;
+}
+
+/// Couleur d'un pixel gris de luminance `l` quand le noir devient `at0` et le blanc `at255`,
+/// avec un dégradé entre les deux (bords adoucis). Symétrique : échanger les deux couleurs
+/// revient exactement à inverser l'image d'abord.
+pub fn tint(l: u32, at0: u32, at255: u32) u32 {
+    const k = @min(l, 255);
+    var out: u32 = 0;
+    inline for (.{ 16, 8, 0 }) |shift| {
+        const a = (at0 >> shift) & 255;
+        const b = (at255 >> shift) & 255;
+        out |= ((a * (255 - k) + b * k + 127) / 255) << shift;
+    }
+    return out;
+}
+
+/// Teinte une image 32 bits BGRA de largeur `w` : les pixels gris visibles passent du noir
+/// à `at0` et du blanc à `at255`, les couleurs franches sont gardées (cercle bleu d'attente,
+/// rouge de « indisponible »). Sans transparence d'origine, l'alpha est fabriqué à partir du
+/// masque ET.
+pub fn tintColorPixels(px: []u32, w: usize, mask: []const u8, mask_stride: usize, at0: u32, at255: u32) void {
+    const has_alpha = for (px) |c| {
+        if (c >> 24 != 0) break true;
+    } else false;
+    for (px, 0..) |*p, i| {
+        const c = p.*;
+        const visible = if (has_alpha) c >> 24 != 0 else maskBit(mask, mask_stride, i % w, i / w) == 0;
+        if (!visible) {
+            p.* = 0;
+            continue;
+        }
+        const a: u32 = if (has_alpha) c & 0xFF000000 else 0xFF000000;
+        p.* = a | if (isGray(c)) tint(luma(c), at0, at255) else c & 0x00FFFFFF;
+    }
+}
+
+/// Version 32 bits teintée d'une image monochrome de curseur : `and_bits` (transparence) et
+/// `xor_bits` (couleur), lignes de `stride` octets. `one_is_white` : le bit de couleur 1
+/// désigne le blanc (cas habituel de la palette). Opaque noir -> `at0`, opaque blanc ->
+/// `at255` ; les pixels transparents et « inverse l'écran » deviennent transparents.
+pub fn monoToColor(and_bits: []const u8, xor_bits: []const u8, stride: usize, w: usize, h: usize, one_is_white: bool, at0: u32, at255: u32, out: []u32) void {
+    std.debug.assert(out.len >= w * h and and_bits.len >= stride * h and xor_bits.len >= stride * h);
+    const white_bit: u1 = if (one_is_white) 1 else 0;
+    for (0..h) |y| {
+        for (0..w) |x| {
+            out[y * w + x] = if (maskBit(and_bits, stride, x, y) == 1)
+                0
+            else if (maskBit(xor_bits, stride, x, y) == white_bit)
+                0xFF000000 | at255
+            else
+                0xFF000000 | at0;
+        }
+    }
+}
+
+/// Écart entre deux couleurs : somme des écarts de rouge, de vert et de bleu (0 à 765).
+pub fn colorDistance(a: u32, b: u32) u32 {
+    var d: u32 = 0;
+    inline for (.{ 16, 8, 0 }) |shift| {
+        const x = (a >> shift) & 255;
+        const y = (b >> shift) & 255;
+        d += @max(x, y) - @min(x, y);
+    }
+    return d;
+}
+
+/// Couleurs possibles du curseur agrandi quand on secoue la souris, par ordre de préférence :
+/// rouge, magenta, orange, bleu.
+pub const SHAKE_COLORS = [_]u32{ RED, 0xE3008C, 0xFF8C00, 0x0078D4 };
+/// Écart minimal entre la couleur de secousse et chacune des deux couleurs choisies.
+pub const SHAKE_MIN_DISTANCE = 200;
+
+/// Couleur du curseur agrandi : le rouge, sauf si une des deux couleurs choisies lui
+/// ressemble ; alors la première couleur de SHAKE_COLORS assez différente des deux (à défaut,
+/// la plus différente).
+pub fn shakeColor(c: Colors) u32 {
+    var best = RED;
+    var best_d: u32 = 0;
+    for (SHAKE_COLORS) |s| {
+        const d = @min(colorDistance(s, c.dark), colorDistance(s, c.light));
+        if (d >= SHAKE_MIN_DISTANCE) return s;
+        if (d > best_d) {
+            best_d = d;
+            best = s;
+        }
+    }
+    return best;
+}
+
+test "validColors : il faut une couleur sombre et une claire, assez éloignées" {
+    try testing.expect(validColors(.{}));
+    for (PRESETS) |p| try testing.expect(validColors(p));
+    try testing.expect(!validColors(.{ .dark = WHITE, .light = BLACK })); // à l'envers
+    try testing.expect(!validColors(.{ .dark = 0x808080, .light = 0x808080 }));
+    try testing.expect(!validColors(.{ .dark = 0xFF0000, .light = 0x0000FF })); // rouge et bleu purs : sombres tous les deux
+    try testing.expect(!validColors(.{ .dark = 0xFFFF00, .light = WHITE })); // jaune : trop clair pour un fond clair
+    try testing.expect(validColors(.{ .dark = 0xFF0000, .light = WHITE })); // rouge pur (76) et blanc
+    try testing.expect(!validColors(.{ .dark = 0x1000000, .light = WHITE })); // pas une couleur
+    // juste à la limite
+    try testing.expect(validColors(.{ .dark = BLACK, .light = 0x969696 })); // 150
+    try testing.expect(!validColors(.{ .dark = BLACK, .light = 0x959595 })); // 149
+}
+
+test "thresholdsFor : noir et blanc redonnent 150 et 105, toujours autour du milieu" {
+    const d = thresholdsFor(.{});
+    try testing.expectEqual(@as(u32, 150), d.to_black);
+    try testing.expectEqual(@as(u32, 105), d.to_white);
+    try testing.expectEqual(Thresholds{}, d);
+    for (PRESETS) |p| {
+        const t = thresholdsFor(p);
+        const mid2 = luma(p.dark) + luma(p.light);
+        try testing.expect(t.to_white < t.to_black);
+        try testing.expect(2 * t.to_white <= mid2 and mid2 <= 2 * t.to_black);
+        try testing.expectEqual(@as(u32, DEAD_BAND), t.to_black - t.to_white);
+        // au moment de changer, le curseur diffère du fond d'au moins 52 points de luminance
+        try testing.expect(t.to_black - luma(p.dark) >= 52 and luma(p.light) - t.to_white >= 52);
+    }
+}
+
+test "thresholdsFor : avec des couleurs valides, une rampe ne bascule qu'une fois dans chaque sens" {
+    const t = thresholdsFor(.{ .dark = 0x202020, .light = 0xC0C0C0 });
+    var s: Shade = decide(.unknown, 0, t);
+    try testing.expectEqual(Shade.white, s);
+    var switches: u32 = 0;
+    var l: u32 = 0;
+    while (l <= 255) : (l += 1) {
+        const n = decide(s, l, t);
+        if (n != s) switches += 1;
+        s = n;
+    }
+    try testing.expectEqual(@as(u32, 1), switches);
+    try testing.expectEqual(Shade.black, s);
+}
+
+test "presetIndex : les couples du menu sont reconnus, les autres non" {
+    for (PRESETS, 0..) |p, i| try testing.expectEqual(@as(?usize, i), presetIndex(p));
+    try testing.expectEqual(@as(?usize, 0), presetIndex(.{}));
+    try testing.expectEqual(@as(?usize, null), presetIndex(.{ .dark = 0x123456, .light = WHITE }));
+    // tous différents
+    for (PRESETS, 0..) |a, i| {
+        for (PRESETS[i + 1 ..]) |b| try testing.expect(!a.eql(b));
+    }
+}
+
+test "tint : extrémités exactes, dégradé, noir -> blanc ne change rien" {
+    try testing.expectEqual(@as(u32, 0x00205B), tint(0, 0x00205B, WHITE));
+    try testing.expectEqual(WHITE, tint(255, 0x00205B, WHITE));
+    try testing.expectEqual(WHITE, tint(1000, 0x00205B, WHITE));
+    var l: u32 = 0;
+    while (l <= 255) : (l += 1) {
+        try testing.expectEqual(l * 0x010101, tint(l, BLACK, WHITE)); // identité
+        try testing.expectEqual((255 - l) * 0x010101, tint(l, WHITE, BLACK)); // négatif
+        // symétrie : échanger les couleurs = inverser l'image
+        try testing.expectEqual(tint(l, 0xFFE600, BLACK), tint(255 - l, BLACK, 0xFFE600));
+    }
+    const mid = tint(128, 0x00205B, WHITE);
+    try testing.expect(luma(mid) > luma(0x00205B) and luma(mid) < 255);
+}
+
+test "tintColorPixels : les gris prennent la teinte, couleurs et transparence gardées" {
+    var px = [_]u32{ 0xFF000000, 0xFFFFFFFF, 0x00000000, 0xFF2060E0, 0x80000000 };
+    tintColorPixels(&px, 5, &.{0}, 1, 0x00205B, WHITE);
+    try testing.expectEqual(@as(u32, 0xFF00205B), px[0]); // corps
+    try testing.expectEqual(@as(u32, 0xFFFFFFFF), px[1]); // contour
+    try testing.expectEqual(@as(u32, 0), px[2]);
+    try testing.expectEqual(@as(u32, 0xFF2060E0), px[3]); // couleur franche gardée
+    try testing.expectEqual(@as(u32, 0x8000205B), px[4]); // bord adouci : alpha gardé
+    // image blanche (corps blanc, contour noir) : corps -> jaune, contour gardé noir
+    var white_style = [_]u32{ 0xFFFFFFFF, 0xFF000000 };
+    tintColorPixels(&white_style, 2, &.{0}, 1, BLACK, 0xFFE600);
+    try testing.expectEqual(@as(u32, 0xFFFFE600), white_style[0]);
+    try testing.expectEqual(@as(u32, 0xFF000000), white_style[1]);
+}
+
+test "monoToColor : chaque bit prend sa couleur, quelle que soit la palette" {
+    const and_bits = [_]u8{ 0b0011_0000, 0 };
+    const xor_bits = [_]u8{ 0b0101_0000, 0 };
+    var out: [4]u32 = undefined;
+    monoToColor(&and_bits, &xor_bits, 2, 4, 1, true, 0x4B0082, 0xFFC1E3, &out);
+    try testing.expectEqual(@as(u32, 0xFF4B0082), out[0]); // noir
+    try testing.expectEqual(@as(u32, 0xFFFFC1E3), out[1]); // blanc
+    try testing.expectEqual(@as(u32, 0), out[2]); // transparent
+    try testing.expectEqual(@as(u32, 0), out[3]); // inverse l'écran
+    monoToColor(&and_bits, &xor_bits, 2, 4, 1, false, 0x4B0082, 0xFFC1E3, &out);
+    try testing.expectEqual(@as(u32, 0xFFFFC1E3), out[0]); // palette inversée : bit 0 = blanc
+    try testing.expectEqual(@as(u32, 0xFF4B0082), out[1]);
+}
+
+test "shakeColor : rouge par défaut, une autre couleur si le rouge ressemble à un des deux choix" {
+    try testing.expectEqual(RED, shakeColor(.{}));
+    for (PRESETS) |p| try testing.expectEqual(RED, shakeColor(p));
+    // corps rouge sombre choisi : le curseur agrandi ne peut pas être rouge
+    const reddish: Colors = .{ .dark = 0xB00020, .light = WHITE };
+    try testing.expect(validColors(reddish));
+    const s = shakeColor(reddish);
+    try testing.expect(s != RED);
+    try testing.expect(colorDistance(s, reddish.dark) >= SHAKE_MIN_DISTANCE);
+    try testing.expect(colorDistance(s, reddish.light) >= SHAKE_MIN_DISTANCE);
+    // rose clair proche du magenta et rouge sombre : ni rouge ni magenta
+    const both: Colors = .{ .dark = 0xA00018, .light = 0xFFB0E0 };
+    const s2 = shakeColor(both);
+    try testing.expect(colorDistance(s2, both.dark) >= SHAKE_MIN_DISTANCE and colorDistance(s2, both.light) >= SHAKE_MIN_DISTANCE);
+    // toujours une des couleurs prévues
+    for ([_]Colors{ .{}, reddish, both, .{ .dark = 0x0050A0, .light = 0xFFD0A0 } }) |c| {
+        const got = shakeColor(c);
+        try testing.expect(std.mem.indexOfScalar(u32, &SHAKE_COLORS, got) != null);
+    }
+}
+
+test "colorDistance : nulle pour la même couleur, maximale entre noir et blanc" {
+    try testing.expectEqual(@as(u32, 0), colorDistance(RED, RED));
+    try testing.expectEqual(@as(u32, 765), colorDistance(BLACK, WHITE));
+    try testing.expectEqual(colorDistance(0x123456, 0x654321), colorDistance(0x654321, 0x123456));
+}
+
+// =====================================================================
 // Secouer pour retrouver la souris : curseur agrandi et rouge
 // =====================================================================
 
@@ -652,52 +940,19 @@ test "bigSizeFor : double tant que l'affichage reste sous 255 px, jamais plus pe
 /// Teinte d'un pixel gris de luminance `l` : rouge pour le noir, blanc pour le blanc,
 /// dégradé entre les deux (bords adoucis des curseurs avec transparence).
 pub fn redTint(l: u32) u32 {
-    const k = @min(l, 255);
-    var out: u32 = 0;
-    inline for (.{ 16, 8, 0 }) |shift| {
-        const c = (RED >> shift) & 255;
-        out |= (c + (255 - c) * k / 255) << shift;
-    }
-    return out;
+    return tint(l, RED, WHITE);
 }
 
 /// Version rouge d'un curseur 32 bits de la version noire (corps noir, contour blanc) :
-/// les pixels gris visibles prennent la teinte rouge, les couleurs franches sont gardées.
-/// Sans transparence d'origine, l'alpha est fabriqué à partir du masque ET.
+/// voir tintColorPixels.
 pub fn reddenColorPixels(px: []u32, w: usize, mask: []const u8, mask_stride: usize) void {
-    const has_alpha = for (px) |c| {
-        if (c >> 24 != 0) break true;
-    } else false;
-    for (px, 0..) |*p, i| {
-        const c = p.*;
-        const visible = if (has_alpha) c >> 24 != 0 else maskBit(mask, mask_stride, i % w, i / w) == 0;
-        if (!visible) {
-            p.* = 0;
-            continue;
-        }
-        const a: u32 = if (has_alpha) c & 0xFF000000 else 0xFF000000;
-        p.* = a | if (isGray(c)) redTint(luma(c)) else c & 0x00FFFFFF;
-    }
+    tintColorPixels(px, w, mask, mask_stride, RED, WHITE);
 }
 
-/// Version rouge 32 bits d'une image monochrome de curseur de la version noire :
-/// `and_bits` (transparence) et `xor_bits` (couleur), lignes de `stride` octets.
-/// `one_is_white` : le bit de couleur 1 désigne le blanc (cas habituel de la palette).
-/// Opaque noir -> rouge, opaque blanc -> blanc ; les pixels transparents et « inverse
-/// l'écran » deviennent transparents.
+/// Version rouge 32 bits d'une image monochrome de curseur de la version noire : voir
+/// monoToColor.
 pub fn monoToRed(and_bits: []const u8, xor_bits: []const u8, stride: usize, w: usize, h: usize, one_is_white: bool, out: []u32) void {
-    std.debug.assert(out.len >= w * h and and_bits.len >= stride * h and xor_bits.len >= stride * h);
-    const white_bit: u1 = if (one_is_white) 1 else 0;
-    for (0..h) |y| {
-        for (0..w) |x| {
-            out[y * w + x] = if (maskBit(and_bits, stride, x, y) == 1)
-                0
-            else if (maskBit(xor_bits, stride, x, y) == white_bit)
-                0xFFFFFFFF
-            else
-                0xFF000000 | RED;
-        }
-    }
+    monoToColor(and_bits, xor_bits, stride, w, h, one_is_white, RED, WHITE, out);
 }
 
 /// Mouvement de va-et-vient sur un axe : repère les demi-tours d'amplitude suffisante.
@@ -1052,14 +1307,25 @@ pub fn join(buf: []u16, parts: []const []const u16) [:0]const u16 {
     return buf[0..n :0];
 }
 
-/// Dessine l'icône de notification dans `buf` (s × s pixels BGRA) : un rond mi-noir
-/// mi-blanc cerclé de gris, en gris atténué quand l'outil est en pause.
-pub fn renderTrayIcon(buf: []u32, s: usize, on: bool) void {
+/// Couleur rapprochée du gris moyen de `eighths` huitièmes.
+fn towardGray(c: u32, eighths: u32) u32 {
+    var out: u32 = 0;
+    inline for (.{ 16, 8, 0 }) |shift| {
+        const v = (c >> shift) & 255;
+        out |= ((v * (8 - eighths) + 128 * eighths) / 8) << shift;
+    }
+    return out;
+}
+
+/// Dessine l'icône de notification dans `buf` (s × s pixels BGRA) : un rond aux deux couleurs
+/// des curseurs (mi-noir mi-blanc par défaut) cerclé de gris, atténué quand l'outil est en pause.
+pub fn renderTrayIcon(buf: []u32, s: usize, on: bool, colors: Colors) void {
     std.debug.assert(buf.len >= s * s);
     const c = @as(f32, @floatFromInt(s - 1)) / 2;
     const r = @as(f32, @floatFromInt(s)) / 2 - 0.5;
-    const left: u32 = if (on) 0x101010 else 0x505050;
-    const right: u32 = if (on) 0xF5F5F5 else 0xB0B0B0;
+    const fade: u32 = if (on) 1 else 5;
+    const left = towardGray(colors.dark, fade);
+    const right = towardGray(colors.light, fade);
     for (0..s) |y| {
         for (0..s) |x| {
             const fx: f32 = @floatFromInt(x);
@@ -1091,7 +1357,7 @@ test "join : tronque proprement si le tampon est trop petit" {
 
 test "renderTrayIcon : coins transparents, moitié gauche sombre, moitié droite claire" {
     var buf: [32 * 32]u32 = undefined;
-    renderTrayIcon(&buf, 32, true);
+    renderTrayIcon(&buf, 32, true, .{});
     try testing.expectEqual(@as(u32, 0), buf[0] >> 24); // coin
     try testing.expectEqual(@as(u32, 0), buf[31] >> 24);
     const mid = 16 * 32;
@@ -1103,10 +1369,25 @@ test "renderTrayIcon : coins transparents, moitié gauche sombre, moitié droite
 test "renderTrayIcon : en pause, contraste atténué" {
     var on: [32 * 32]u32 = undefined;
     var off: [32 * 32]u32 = undefined;
-    renderTrayIcon(&on, 32, true);
-    renderTrayIcon(&off, 32, false);
+    renderTrayIcon(&on, 32, true, .{});
+    renderTrayIcon(&off, 32, false, .{});
     const mid = 16 * 32;
     const contrast_on = luma(on[mid + 24]) - luma(on[mid + 8]);
     const contrast_off = luma(off[mid + 24]) - luma(off[mid + 8]);
     try testing.expect(contrast_off < contrast_on);
+}
+
+test "renderTrayIcon : les deux moitiés prennent les couleurs choisies" {
+    var buf: [32 * 32]u32 = undefined;
+    const colors: Colors = .{ .dark = 0x00205B, .light = 0xFFE600 };
+    renderTrayIcon(&buf, 32, true, colors);
+    const mid = 16 * 32;
+    try testing.expect(colorDistance(buf[mid + 8] & 0xFFFFFF, colors.dark) < 60); // gauche : bleu nuit
+    try testing.expect(colorDistance(buf[mid + 24] & 0xFFFFFF, colors.light) < 60); // droite : jaune
+    // par défaut, les teintes d'avant : presque noir et presque blanc
+    renderTrayIcon(&buf, 32, true, .{});
+    try testing.expectEqual(@as(u32, 0x101010), buf[mid + 8] & 0xFFFFFF);
+    renderTrayIcon(&buf, 32, false, .{});
+    try testing.expectEqual(@as(u32, 0x505050), buf[mid + 8] & 0xFFFFFF);
+    try testing.expectEqual(@as(u32, 0xAFAFAF), buf[mid + 24] & 0xFFFFFF);
 }

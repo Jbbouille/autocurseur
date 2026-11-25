@@ -6,10 +6,11 @@ const w = @import("win32.zig");
 pub var px: [core.ICON_MAX * core.ICON_MAX]u32 = undefined;
 pub var mask: [core.ICON_MAX / 8 * core.ICON_MAX]u8 = @splat(0); // tout opaque : l'alpha décide
 
-/// Icône active (`on`) ou en pause, à la taille des petites icônes du système.
-pub fn create(on: bool) w.HICON {
+/// Icône active (`on`) ou en pause, aux couleurs des curseurs, à la taille des petites icônes
+/// du système.
+pub fn create(on: bool, colors: core.Colors) w.HICON {
     const s: usize = @intCast(@min(@max(w.GetSystemMetrics(w.SM_CXSMICON), 16), core.ICON_MAX));
-    core.renderTrayIcon(&px, s, on);
+    core.renderTrayIcon(&px, s, on, colors);
     const color = w.CreateBitmap(@intCast(s), @intCast(s), 1, 32, &px);
     const m = w.CreateBitmap(@intCast(s), @intCast(s), 1, 1, &mask);
     defer {

@@ -4,9 +4,9 @@
 
 [English](README.md) · **Français**
 
-Petit utilitaire Windows écrit en Zig : le curseur devient **noir sur fond clair** et **blanc sur fond sombre**, en entier. Quand on secoue la souris, il grossit et devient rouge pour qu'on le retrouve.
+Petit utilitaire Windows écrit en Zig : le curseur devient **noir sur fond clair** et **blanc sur fond sombre**, en entier. Le noir et le blanc peuvent être remplacés par deux couleurs de votre choix. Quand on secoue la souris, il grossit et devient rouge pour qu'on le retrouve.
 
-Code natif, environ 100 Ko, aucune allocation dynamique, environ 0,2 % d'un cœur de processeur.
+Code natif, environ 105 Ko, aucune allocation dynamique, environ 0,2 % d'un cœur de processeur.
 
 ## Pourquoi
 
@@ -24,6 +24,7 @@ Une icône ronde mi-noire mi-blanche apparaît dans la zone de notification :
   - *Actif* ;
   - *Vérifications par seconde (souris en mouvement)* : 3, 5, 10 (par défaut) ou 20 ;
   - *Langue* : automatique (celle de Windows), English ou Français ;
+  - *Couleurs* : noir / blanc (par défaut), trois autres couples, ou vos deux couleurs ;
   - *Secouer pour retrouver le curseur (agrandi, en rouge)* : actif par défaut ;
   - *Lancer au démarrage de Windows* ;
   - *Quitter* ;
@@ -47,6 +48,7 @@ Un service ne conviendrait pas : il tourne en dehors de votre session et ne peut
 4. Il décide avec une **hystérésis** :
    - à partir de 150, le curseur passe en noir ;
    - à 105 ou moins, il passe en blanc ;
+   - avec d'autres couleurs que le noir et le blanc, les deux seuils les suivent (voir *Choisir les deux couleurs*) ;
    - entre les deux, il ne change pas. Cela évite le clignotement sur les gris moyens et le long d'une frontière.
 5. Il change la couleur **du seul pointeur affiché**. Windows a 17 pointeurs (flèche, sélection de texte, main des liens, flèches de redimensionnement…) ; AutoCurseur retient la couleur de chacun, et Windows le prévient chaque fois que la forme du pointeur change : la nouvelle forme prend aussitôt la bonne couleur (en bien moins d'un centième de seconde). Les vérifications ci-dessus regardent aussi le pointeur affiché, au cas où un avis se perdrait.
 
@@ -71,6 +73,19 @@ Les curseurs ont la forme des curseurs blancs habituels de Windows (« Windows A
 La flèche « Windows Black », utilisée jusqu'à la version 0.1.0, avait une queue plus longue et des bords en escalier, et quand elle laissait la place à la sélection de texte, elle laissait une trace visible à l'écran. La flèche du style blanc, en noir, n'en laisse pas.
 
 La **taille** des curseurs est celle de la flèche que Windows affiche à ce moment-là. À 250 % d'affichage, Windows utilise 64 px, et non 32 × 2,5 = 80.
+
+## Choisir les deux couleurs
+
+Le noir et le blanc peuvent être remplacés depuis le menu *Couleurs* : par un des couples proposés (bleu nuit / jaune, vert sapin / vert clair, violet / rose), ou par vos propres couleurs, choisies dans le sélecteur de couleur standard de Windows (*Sur fond clair…* et *Sur fond sombre…*).
+
+- **Le corps prend la couleur, le contour garde la couleur opposée** : blanc autour de la couleur affichée sur fond clair, noir autour de celle affichée sur fond sombre. Les parties colorées, comme le rouge de *indisponible*, sont gardées.
+- **Les seuils de bascule suivent les couleurs** : ils sont au milieu des luminances des deux couleurs, à 22,5 près de chaque côté. Le noir et le blanc donnent 150 et 105, comme plus haut.
+- **Garde-fou** : il faut une couleur sombre et une claire, écartées d'au moins 150 points de luminance (sur 255). Juste avant de changer de couleur, le curseur diffère alors encore du fond d'au moins 52 points. Une couleur trop proche de l'autre est refusée, avec un message, et rien ne change.
+- **Couleur de la secousse** : rouge, sauf si une de vos deux couleurs lui ressemble ; alors magenta, orange ou bleu, la première assez différente des deux.
+- **Fichiers** : les curseurs colorés sont des fichiers 32 bits, 17 par couleur ; changer de couleurs les réécrit en 40 ms environ, et les nouvelles couleurs sont à l'écran environ 0,1 s après le clic. De retour au noir et blanc, les fichiers de Windows resservent tels quels et les doublons sont supprimés. Avec un pointeur agrandi, les dessins vectoriels sont teintés de la même façon.
+- L'icône de la zone de notification prend les deux couleurs.
+
+Le sélecteur de couleur est celui de Windows (`comdlg32.dll`), chargé seulement pendant qu'il est ouvert ; il s'ouvre centré sur la souris, et AutoCurseur continue de fonctionner pendant ce temps.
 
 ## Plusieurs écrans
 
@@ -107,7 +122,7 @@ Mesures faites par les tests de performance et les tests système, sur un PC por
 
 | | |
 |---|---|
-| Exécutable | environ 98 Ko en ReleaseFast |
+| Exécutable | environ 106 Ko en ReleaseFast |
 | Mémoire privée | environ 2 Mo |
 | Fichiers écrits une fois | 34 curseurs classiques, environ 4 Mo, vérifiés en 13 ms environ au démarrage ; avec un pointeur agrandi, 51 curseurs vectoriels (5 Mo) dessinés en 0,3 s environ |
 | Processeur, souris immobile | environ 0,15 % d'un cœur |
@@ -115,6 +130,7 @@ Mesures faites par les tests de performance et les tests système, sur un PC por
 | Une lecture d'écran | environ 0,3 ms de processeur |
 | Changement noir ↔ blanc (seul le pointeur affiché, relu depuis son fichier) | environ 0,8 ms (environ 10 ms avec le plus grand pointeur) |
 | Recoloration d'une forme de pointeur qui apparaît (main des liens…) | moins de 1 ms après l'avis de Windows |
+| Changement des deux couleurs (51 fichiers réécrits) | environ 40 ms |
 | 2 s de secousse (lectures d'écran comprises) | environ 20 à 40 ms de processeur |
 | Attente la plus longue d'une réponse d'AutoCurseur pendant que la souris bouge | moins de 16 ms (lectures d'écran sur un fil à part) |
 
@@ -136,9 +152,9 @@ L'exécutable est produit dans `zig-out\bin\AutoCurseur.exe`, compilé en **Rele
 zig build test
 ```
 
-Cette commande lance 147 tests, sans toucher au curseur de votre session :
+Cette commande lance 170 tests, sans toucher au curseur de votre session :
 
-- **unitaires** (`src/*.zig`) : décision et hystérésis, luminance, inversion des pixels couleur et monochromes, teinte rouge, détection de secousse (vraies secousses, corrections de visée, va-et-vient vifs mais courts ou lents, aller trop court qui interrompt la série, passage par zéro du compteur de millisecondes), géométrie de la zone lue, tailles, rythme de la minuterie (budgets de lectures par seconde), textes dans les deux langues, identifiants du menu, icône, absence d'allocation et budget de mémoire statique ;
+- **unitaires** (`src/*.zig`) : décision et hystérésis, luminance, inversion des pixels couleur et monochromes, teinte dans n'importe quelle couleur (rouge compris), seuils de bascule déduits des deux couleurs, garde-fou sur les couleurs, couleur de la secousse, détection de secousse (vraies secousses, corrections de visée, va-et-vient vifs mais courts ou lents, aller trop court qui interrompt la série, passage par zéro du compteur de millisecondes), géométrie de la zone lue, tailles, rythme de la minuterie (budgets de lectures par seconde), textes dans les deux langues, identifiants du menu, icône, absence d'allocation et budget de mémoire statique ;
   - fichiers `.cur` (`src/curfile.zig`) : lecture, refus des images PNG, compressées ou tronquées, versions inversée et rouge, double inversion qui redonne l'original, alignement sur 4 octets, tampon trop petit, fichiers d'une seule image 1 bit et 32 bits ;
   - curseurs vectoriels (`src/svgcur.zig`) : remplacement des couleurs, conversion en 1 bit (tout pixel touché est visible), couleurs non prémultipliées, points chauds ;
 - **intégration** (`tests/integration.zig`) :
@@ -147,6 +163,7 @@ Cette commande lance 147 tests, sans toucher au curseur de votre session :
   - les fichiers écrits : toutes les tailles de 32 à 128 px gardées, écrits une fois, pas réécrits s'ils sont à jour, réécrits s'ils sont abîmés ;
   - jeu rouge : chaque curseur deux fois plus grand, la flèche identique à la noire avec seulement ses pixels noirs passés en rouge (bords adoucis compris), contour sans trou ;
   - fichiers laissés par une version précédente supprimés quand les nouveaux sont écrits ;
+  - couleurs choisies, dans un dossier temporaire : les deux jeux fabriqués avec le corps de la couleur choisie et le contour opposé, même forme et même point chaud, parties colorées gardées ; une seule couleur changée (l'autre jeu garde les fichiers de Windows) ; retour au noir et blanc (fichiers de Windows repris, doublons supprimés) ; couleur de la secousse qui change quand le rouge ressemble à une couleur choisie ; curseurs vectoriels teintés en 32 bits avec les mêmes pixels visibles ;
   - aucun objet Windows perdu après 20 rechargements ;
   - reconnaissance du pointeur affiché : chacun des 17 curseurs du système à sa poignée, jamais un curseur chargé par un programme ;
   - le fil de lecture de l'écran : répond à une demande, ne garde que la dernière de 50 demandes d'affilée, s'arrête proprement, lit sur place une fois arrêté ;
@@ -159,11 +176,12 @@ Cette commande lance 147 tests, sans toucher au curseur de votre session :
 zig build test-system
 ```
 
-Ces 18 tests système changent réellement le curseur pendant une minute environ, déplacent la souris, puis remettent tout en place. Quittez AutoCurseur avant de les lancer (`zig build check-system` les compile sans les lancer). Ils vérifient :
+Ces 21 tests système changent réellement le curseur pendant deux minutes environ, déplacent la souris, puis remettent tout en place. Quittez AutoCurseur avant de les lancer (`zig build check-system` les compile sans les lancer). Ils vérifient :
 
 - l'application puis la restauration des curseurs, et leur taille ;
 - des curseurs d'une autre taille laissés par un ancien lancement, qui ne doivent pas être repris ;
 - les réglages « vérifications par seconde », « langue » et « secouer » envoyés par le menu, puis mémorisés ; vos réglages du registre sont remis ensuite ;
+- les couleurs : un couple choisi dans le menu est appliqué tout de suite, mémorisé, et repris au lancement suivant ; une couleur personnalisée saisie dans le sélecteur de Windows (ouvert centré sur la souris, AutoCurseur répondant toujours) est appliquée, ou refusée avec un message si elle est trop proche de l'autre ; annuler ne change rien ; quitter pendant que le sélecteur est ouvert ferme tout ; les couleurs enregistrées sont relues, un couple invalide est ignoré ;
 - 200 bascules successives ;
 - sur une fenêtre de test (fond clair ou sombre, flèche ou main des liens, toujours au premier plan) : seul le pointeur affiché change de couleur, chaque autre forme quand elle apparaît, aucune ne reste rouge après une secousse ; changer la couleur du seul pointeur affiché reste rapide même pointeur agrandi ; avec le vrai exécutable, une main qui apparaît est recolorée en moins de 100 ms pendant que la flèche cachée attend son tour ;
 - avec des écrans d'agrandissements différents : sur chaque écran, le curseur réellement affiché par Windows (capturé par l'API de duplication d'écran, `tests/tools/ptrcap.c`) a la taille que Windows donne là à ses propres curseurs, et c'est au pixel près l'image de cette taille dans nos fichiers, pour les jeux noir, blanc et rouge ; test ignoré avec un seul agrandissement ;
@@ -175,7 +193,7 @@ Ces 18 tests système changent réellement le curseur pendant une minute environ
 
 ## Intégration continue
 
-À chaque push et pull request, [GitHub Actions](.github/workflows/ci.yml) installe Zig sur une machine Windows. Il lance `zig build test` et `zig build test-system`, compile l'exe en ReleaseFast et le met à disposition comme artefact.
+À chaque push et pull request, [GitHub Actions](.github/workflows/ci.yml) installe Zig sur une machine Windows. Il lance `zig build test` et `zig build test-system`, compile l'exe en ReleaseFast et le met à disposition comme artefact. Cette machine n'affiche aucun pointeur : les tests système qui ont besoin de voir le curseur affiché y sont ignorés, les autres tournent.
 
 Pour publier une version, poussez un tag `v*` (par exemple `git tag v0.1.0` puis `git push origin v0.1.0`). Une fois les tests passés, la pipeline crée la release GitHub avec l'exe testé, puis propose la nouvelle version à winget (voir [packaging/winget](packaging/winget/README.md)).
 
@@ -189,6 +207,7 @@ src/svgcur.zig    curseurs vectoriels dessinés avec Direct2D, comme Windows 11 
 src/sampler.zig   lecture de l'écran sous la souris, sur un fil à part
 src/icon.zig      icône de la zone de notification
 src/i18n.zig      textes du menu en anglais et en français
+src/colorpick.zig sélecteur de couleur de Windows pour les couleurs personnalisées, chargé à la demande
 src/settings.zig  réglages mémorisés (HKCU\Software\AutoCurseur)
 src/main.zig      fenêtre cachée, menu, minuteries : relie le tout
 src/win32.zig     déclarations de l'API Windows utilisées
@@ -202,10 +221,12 @@ packaging/winget/ manifestes winget
 
 | Où | Nom | Défaut | Rôle |
 |---|---|---|---|
-| `core.zig` | `Thresholds.to_black` | 150 | luminance à partir de laquelle le curseur passe en noir |
+| `core.zig` | `Thresholds.to_black` | 150 | luminance à partir de laquelle le curseur passe en noir (déduite des deux couleurs : `thresholdsFor`) |
 | `core.zig` | `Thresholds.to_white` | 105 | luminance en dessous de laquelle il repasse en blanc |
 | menu | vérifications par seconde | 10 | 3, 5, 10 ou 20 quand la souris bouge (`core.RATES`) |
 | menu | langue | automatique | suit la langue d'affichage de Windows : français pour toute variante du français, anglais sinon |
+| menu | couleurs | noir / blanc | un couple de `core.PRESETS`, ou deux couleurs personnalisées, une sombre et une claire |
+| `core.zig` | `MIN_LUMA_GAP` | 150 | écart de luminance minimal entre les deux couleurs |
 | menu | secouer pour retrouver | actif | curseur agrandi et rouge quand on secoue la souris |
 | `core.zig` | `SHAKE_TURNS`, `SHAKE_WINDOW_MS` | 5, 1000 | demi-tours amples et consécutifs nécessaires, et la durée dans laquelle ils doivent tenir |
 | `core.zig` | `SHAKE_SEG_FACTOR` | 3 | aller minimal, en tailles de curseur |
@@ -214,7 +235,7 @@ packaging/winget/ manifestes winget
 | `core.zig` | `IDLE_MS` | 250 | période en mode lent (jamais plus fréquente qu'en mouvement) |
 | `core.zig` | `MAX_CUR` | 256 | taille max d'un curseur, qui dimensionne les tampons statiques |
 
-Les choix du menu sont des valeurs `DWORD` dans `HKCU\Software\AutoCurseur` : `LecturesParSeconde`, `Langue` (0 automatique, 1 anglais, 2 français) et `SecouerPourRetrouver` (0 ou 1).
+Les choix du menu sont des valeurs `DWORD` dans `HKCU\Software\AutoCurseur` : `LecturesParSeconde`, `Langue` (0 automatique, 1 anglais, 2 français), `SecouerPourRetrouver` (0 ou 1), et les deux couleurs en `0xRRGGBB` : `CouleurSurFondClair` (affichée sur les fonds clairs) et `CouleurSurFondSombre`.
 
 ## Limites
 

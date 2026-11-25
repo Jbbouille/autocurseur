@@ -17,6 +17,7 @@ const sampler = @import("sampler.zig");
 const icon = @import("icon.zig");
 const settings = @import("settings.zig");
 const i18n = @import("i18n.zig");
+const colorpick = @import("colorpick.zig");
 const L = std.unicode.utf8ToUtf16LeStringLiteral;
 
 const APP_NAME = L("AutoCurseur");
@@ -32,6 +33,9 @@ const ID_QUIT = 3;
 const ID_SHAKE = settings.MENU_SHAKE;
 
 var shade: core.Shade = .unknown;
+var colors: core.Colors = .{}; // couleurs des deux jeux de curseurs (noir et blanc par défaut)
+var thresholds: core.Thresholds = .{}; // seuils de bascule, déduits des couleurs
+var picking = false; // le sélecteur de couleur de Windows est-il ouvert ?
 var active = false;
 var rate: u32 = core.DEFAULT_RATE; // lectures par seconde quand la souris bouge
 var lang: i18n.Choice = .auto;
@@ -83,7 +87,7 @@ fn setOf(s: core.Shade) cursors.Set {
 /// Luminance lue sous la souris : choix du jeu noir ou blanc.
 fn onSample(l: u32) void {
     if (!active) return; // réponse arrivée après la mise en pause
-    const want = core.decide(shade, l, .{});
+    const want = core.decide(shade, l, thresholds);
     if (want != shade) {
         shade = want;
         if (!big) cursors.show(setOf(want)); // agrandi : on attend la fin pour changer
@@ -219,6 +223,59 @@ fn setShake(on: bool) void {
     }
 }
 
+// ---------- couleurs ----------
+
+/// Applique un couple de couleurs : seuils, fichiers des curseurs, icône. Les curseurs de
+/// Windows reviennent le temps de refaire les fichiers (aucun des nôtres n'est en service
+/// pendant qu'ils sont réécrits), puis la couleur qui convient au fond est remise.
+fn applyColors(c: core.Colors) void {
+    if (active) {
+        _ = killShake();
+        restore();
+    }
+    colors = c;
+    thresholds = core.thresholdsFor(c);
+    cursors.setColors(c);
+    _ = cursors.prepare(shake_on);
+    useVectorIfEnlarged();
+    const old_on = ico_on;
+    const old_off = ico_off;
+    ico_on = icon.create(true, c);
+    ico_off = icon.create(false, c);
+    refreshIcon();
+    if (old_on) |i| _ = w.DestroyIcon(i);
+    if (old_off) |i| _ = w.DestroyIcon(i);
+    if (active) {
+        var p: core.Point = .{};
+        if (w.GetCursorPos(&p) != 0) update(p); // tout de suite, sans attendre le prochain tic
+    }
+}
+
+/// Change les couleurs des curseurs, tout de suite, et les mémorise. Un couple qui n'a pas
+/// une couleur sombre et une claire est refusé.
+fn setColors(c: core.Colors) void {
+    if (!core.validColors(c) or c.eql(colors)) return;
+    settings.saveColors(c);
+    applyColors(c);
+}
+
+/// Ouvre le sélecteur de couleur de Windows pour la couleur sur fond clair (`dark`) ou sur
+/// fond sombre. Le reste d'AutoCurseur continue de tourner pendant le choix.
+fn pickColor(dark: bool) void {
+    if (picking) return;
+    picking = true;
+    defer picking = false;
+    const initial = if (dark) colors.dark else colors.light;
+    const got = colorpick.pick(initial, if (dark) text.pick_dark_title else text.pick_light_title) orelse return;
+    var c = colors;
+    if (dark) c.dark = got else c.light = got;
+    if (!core.validColors(c)) {
+        _ = w.MessageBoxW(null, text.colors_too_close, APP_NAME, w.MB_ICONWARNING | w.MB_SETFOREGROUND | w.MB_TOPMOST);
+        return;
+    }
+    setColors(c);
+}
+
 // ---------- démarrage automatique ----------
 
 fn getStartup() bool {
@@ -316,6 +373,21 @@ fn showMenu() void {
         _ = w.AppendMenuW(m, w.MF_POPUP, @intFromPtr(sub), text.language_menu);
     }
 
+    if (w.CreatePopupMenu()) |sub| {
+        const current = core.presetIndex(colors);
+        for (text.presets, 0..) |label, i| {
+            const flag: u32 = if (current == i) w.MF_CHECKED else 0;
+            _ = w.AppendMenuW(sub, w.MF_STRING | w.MFT_RADIOCHECK | flag, settings.COLOR_MENU_BASE + i, label.ptr);
+        }
+        _ = w.AppendMenuW(sub, w.MF_SEPARATOR, 0, null);
+        // couleurs personnalisées : cochées quand le couple n'est pas un de ceux du menu
+        const custom_dark: u32 = if (current == null and colors.dark != core.BLACK) w.MF_CHECKED else 0;
+        const custom_light: u32 = if (current == null and colors.light != core.WHITE) w.MF_CHECKED else 0;
+        _ = w.AppendMenuW(sub, w.MF_STRING | custom_dark, settings.MENU_COLOR_DARK, text.color_dark);
+        _ = w.AppendMenuW(sub, w.MF_STRING | custom_light, settings.MENU_COLOR_LIGHT, text.color_light);
+        _ = w.AppendMenuW(m, w.MF_POPUP, @intFromPtr(sub), text.colors_menu);
+    }
+
     const shake_flag: u32 = if (shake_on) w.MF_CHECKED else 0;
     _ = w.AppendMenuW(m, w.MF_STRING | shake_flag, ID_SHAKE, text.shake);
     _ = w.AppendMenuW(m, w.MF_STRING | startup_flag, ID_STARTUP, text.startup);
@@ -356,11 +428,15 @@ fn wndProc(h: w.HWND, msg: u32, wp: w.WPARAM, lp: w.LPARAM) callconv(.winapi) w.
                 ID_ACTIVE => setActive(!active),
                 ID_STARTUP => setStartup(!getStartup()),
                 ID_SHAKE => setShake(!shake_on),
+                settings.MENU_COLOR_DARK => pickColor(true),
+                settings.MENU_COLOR_LIGHT => pickColor(false),
                 ID_QUIT => _ = w.DestroyWindow(h),
                 else => if (settings.rateFromMenuId(id)) |r| {
                     setRate(r);
                 } else if (settings.langFromMenuId(id)) |c| {
                     setLang(c);
+                } else if (settings.colorsFromMenuId(id)) |c| {
+                    setColors(c);
                 },
             }
             return 0;
@@ -409,13 +485,16 @@ pub fn main() void {
     rate = settings.loadRate();
     applyLang(settings.loadLang());
     shake_on = settings.loadShake();
-    // fichiers des versions inversée et rouge (réécrits seulement s'ils ont changé)
+    colors = settings.loadColors();
+    thresholds = core.thresholdsFor(colors);
+    cursors.setColors(colors);
+    // fichiers des versions inversée, teintée et rouge (réécrits seulement s'ils ont changé)
     _ = cursors.useDefaultDir();
     _ = cursors.prepare(shake_on);
     _ = sampler.startWorker(wnd, WM_SAMPLE); // sans fil, les lectures se font sur place
     reload();
-    ico_on = icon.create(true);
-    ico_off = icon.create(false);
+    ico_on = icon.create(true, colors);
+    ico_off = icon.create(false, colors);
 
     nid.hWnd = wnd;
     nid.uID = 1;

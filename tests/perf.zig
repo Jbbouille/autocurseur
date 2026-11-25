@@ -103,6 +103,37 @@ test "perf : préparation au démarrage quand les fichiers sont déjà à jour" 
     try testing.expect(r.wall_us < 200_000);
 }
 
+test "perf : changement de couleurs, les 51 fichiers refaits" {
+    var name: [64]u16 = undefined;
+    var num: [16]u8 = undefined;
+    const tick = try std.fmt.bufPrint(&num, "{d}", .{w.GetTickCount()});
+    var k: usize = 0;
+    for (h.L("AutoCurseur-tests\\perf-")) |c| {
+        name[k] = c;
+        k += 1;
+    }
+    for (tick) |c| {
+        name[k] = c;
+        k += 1;
+    }
+    try testing.expect(cursors.setDir(h.L("TEMP"), name[0..k]));
+    defer {
+        h.removeDir(cursors.dirPath());
+        cursors.setColors(.{});
+        _ = cursors.useDefaultDir();
+    }
+    _ = cursors.prepare(true); // noir et blanc, comme avant le changement
+    const n = 6;
+    const t = h.Timer.start();
+    for (0..n) |i| {
+        cursors.setColors(core.PRESETS[1 + i % 2]);
+        try testing.expect(cursors.prepare(true) >= 2 * cursors.COUNT);
+    }
+    const r = t.perIteration(n);
+    h.report("changement de couleurs (fichiers refaits)", r.wall_us / 1000, "ms", 1000);
+    try testing.expect(r.wall_us < 1_000_000);
+}
+
 test "perf : chargement d'un curseur depuis son fichier (fait 17 fois par bascule)" {
     try skipIfEnlarged();
     h.dpiAware();

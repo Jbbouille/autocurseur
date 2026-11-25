@@ -17,12 +17,16 @@ const Saved = struct {
     rate: ?u32,
     lang: ?u32,
     shake: ?u32,
+    dark: ?u32,
+    light: ?u32,
 
     fn take() Saved {
         return .{
             .rate = settings.readDword(settings.RATE_VALUE),
             .lang = settings.readDword(settings.LANG_VALUE),
             .shake = settings.readDword(settings.SHAKE_VALUE),
+            .dark = settings.readDword(settings.DARK_VALUE),
+            .light = settings.readDword(settings.LIGHT_VALUE),
         };
     }
 
@@ -31,8 +35,18 @@ const Saved = struct {
         if (v.rate) |x| settings.writeDword(settings.RATE_VALUE, x);
         if (v.lang) |x| settings.writeDword(settings.LANG_VALUE, x);
         if (v.shake) |x| settings.writeDword(settings.SHAKE_VALUE, x);
+        if (v.dark) |x| settings.writeDword(settings.DARK_VALUE, x);
+        if (v.light) |x| settings.writeDword(settings.LIGHT_VALUE, x);
     }
 };
+
+/// Réglages par défaut le temps d'un test (noir et blanc, 10 lectures par seconde…) : renvoie
+/// ceux de l'utilisateur, à remettre à la fin avec `put`.
+fn defaults() Saved {
+    const saved = Saved.take();
+    settings.reset();
+    return saved;
+}
 
 fn systemArrow() !h.Stats {
     return h.stats(w.LoadCursorW(null, w.IDC_ARROW));
@@ -209,7 +223,14 @@ const Surface = struct {
             std.debug.print("  la souris ne peut pas être déplacée dans cette session : test ignoré\n", .{});
             return error.SkipZigTest;
         }
-        try s.useCursor(id);
+        s.useCursor(id) catch {
+            // machine sans pointeur affiché (intégration continue, session sans souris) : Windows
+            // n'y montre aucun curseur, AutoCurseur n'a donc rien à recolorer
+            var ci: w.CURSORINFO = .{};
+            _ = w.GetCursorInfo(&ci);
+            std.debug.print("  aucun pointeur affiché dans cette session (état {d}, curseur {?d}) : test ignoré\n", .{ ci.flags, cursors.indexOf(ci.hCursor) });
+            return error.SkipZigTest;
+        };
         return s;
     }
 
@@ -354,6 +375,8 @@ test "système : les curseurs générés ont la taille de ceux de Windows" {
 
 test "système : des curseurs d'une autre taille laissés par un ancien lancement ne sont pas repris" {
     try skipIfRunning();
+    const saved = defaults();
+    defer saved.put();
     const before = try systemArrow();
     defer cursors.restore();
     defer cursors.free();
@@ -426,6 +449,8 @@ test "système : basculer 200 fois ne fait rien fuir et reste rapide" {
 
 test "système : l'exécutable bascule, consomme peu, reste unique et se ferme proprement" {
     try skipIfRunning();
+    const saved = defaults();
+    defer saved.put();
     const before = try systemArrow();
     defer cursors.free();
     cursors.load(cursors.systemSize());
@@ -478,6 +503,8 @@ test "système : l'exécutable bascule, consomme peu, reste unique et se ferme p
 
 test "système : l'exécutable recolore aussitôt la forme de pointeur qui apparaît" {
     try skipIfRunning();
+    const saved = defaults();
+    defer saved.put();
     const before = try systemArrow();
     cursors.restore();
     const hand_before = try h.stats(sysCursor(ID_HAND));
@@ -908,6 +935,8 @@ fn responds(hwnd: w.HWND) bool {
 
 test "système : après un changement de taille du pointeur, les curseurs reviennent même si Windows repasse après sa notification" {
     try skipIfRunning();
+    const saved = defaults();
+    defer saved.put();
     const before = try systemArrow();
     defer cursors.free();
     cursors.load(cursors.systemSize());
@@ -957,6 +986,8 @@ test "système : après un changement de taille du pointeur, les curseurs revien
 
 test "système : une rafale de notifications (curseur « Taille » qu'on fait glisser) ne bloque pas AutoCurseur" {
     try skipIfRunning();
+    const saved = defaults();
+    defer saved.put();
     defer cursors.free();
     cursors.load(cursors.systemSize());
     const black = try h.stats(cursors.black[0]);
@@ -1056,6 +1087,8 @@ test "système : pointeur agrandi, nos curseurs ont la taille et la forme de ceu
 
 test "système : pendant que la souris bouge, AutoCurseur répond toujours vite (lectures d'écran sur un fil à part)" {
     try skipIfRunning();
+    const saved = defaults();
+    defer saved.put();
     var orig: core.Point = .{};
     _ = w.GetCursorPos(&orig);
     defer _ = w.SetCursorPos(orig.x, orig.y);
@@ -1087,6 +1120,234 @@ test "système : pendant que la souris bouge, AutoCurseur répond toujours vite 
     h.report("attente la plus longue d'une réponse", @floatFromInt(worst), "ms", 250);
     try testing.expect(worst < 250);
 
+    _ = w.PostMessageW(hwnd, w.WM_CLOSE, 0, 0);
+    try testing.expect(p.exitedWithin(5000));
+}
+
+// ---------------------------------------------------------------------
+// Couleurs des curseurs
+// ---------------------------------------------------------------------
+
+/// Attend (au plus `ms`) que le curseur du système `id` ait au moins 20 pixels exactement de
+/// la couleur `rgb` ; renvoie le délai.
+fn waitColor(id: u32, rgb: u32, ms: u32) !u32 {
+    const t0 = w.GetTickCount();
+    while (true) {
+        const t = w.GetTickCount() -% t0;
+        if ((h.colorCount(sysCursor(id), rgb) catch 0) > 20) return t;
+        if (t > ms) return error.CouleurAttendueAbsente;
+        w.Sleep(5);
+    }
+}
+
+/// Remet en noir et blanc les fichiers de curseurs de l'application : l'exécutable lancé par
+/// un test a pu les refaire à d'autres couleurs.
+fn restoreFiles() void {
+    _ = cursors.useDefaultDir(); // oublie ce qui était prêt
+    _ = cursors.prepare(true);
+}
+
+test "système : réglages de couleurs enregistrés et relus, un couple invalide est refusé" {
+    const saved = defaults();
+    defer saved.put();
+    const pair = core.PRESETS[1];
+    try testing.expect(settings.loadColors().eql(.{}));
+    settings.saveColors(pair);
+    try testing.expect(settings.loadColors().eql(pair));
+    try testing.expectEqual(@as(?u32, pair.dark), settings.readDword(settings.DARK_VALUE));
+    try testing.expectEqual(@as(?u32, pair.light), settings.readDword(settings.LIGHT_VALUE));
+    // un couple refusé n'est pas enregistré
+    settings.saveColors(.{ .dark = core.WHITE, .light = core.BLACK });
+    try testing.expect(settings.loadColors().eql(pair));
+    // valeurs incohérentes écrites à la main dans le registre : noir et blanc
+    settings.writeDword(settings.DARK_VALUE, 0xFFFF00);
+    try testing.expect(settings.loadColors().eql(.{}));
+    settings.writeDword(settings.DARK_VALUE, 0xFFFFFFFF);
+    try testing.expect(settings.loadColors().eql(.{}));
+    // une seule valeur enregistrée : l'autre garde sa couleur par défaut
+    settings.reset();
+    settings.writeDword(settings.LIGHT_VALUE, pair.light);
+    try testing.expect(settings.loadColors().eql(.{ .light = pair.light }));
+}
+
+test "système : un couple de couleurs choisi dans le menu est appliqué tout de suite, mémorisé, et repris au lancement suivant" {
+    try skipIfRunning();
+    const saved = defaults();
+    defer saved.put();
+    defer restoreFiles();
+    const before = try systemArrow();
+    var orig: core.Point = .{};
+    _ = w.GetCursorPos(&orig);
+    defer _ = w.SetCursorPos(orig.x, orig.y);
+    const s = try Surface.open(LIGHT, ID_ARROW);
+    defer s.close();
+    const pair = core.PRESETS[1]; // bleu nuit / jaune
+
+    const p = try Proc.startReady();
+    defer p.kill();
+    defer cursors.restore();
+    const hwnd = w.FindWindowW(L("AutoCurseur"), null) orelse return error.FenetreIntrouvable;
+    _ = try waitColor(ID_ARROW, core.BLACK, 3000); // noir sur le fond clair, au départ
+
+    // même chemin qu'un clic dans le sous-menu « Couleurs »
+    _ = w.PostMessageW(hwnd, w.WM_COMMAND, settings.COLOR_MENU_BASE + 1, 0);
+    const delay = try waitColor(ID_ARROW, pair.dark, 3000);
+    h.report("délai pour changer de couleurs depuis le menu", @floatFromInt(delay), "ms", 3000);
+    try testing.expect(settings.loadColors().eql(pair));
+    try testing.expectEqual(@as(usize, 0), try h.colorCount(sysCursor(ID_ARROW), core.BLACK));
+    // fond sombre : la couleur claire du couple
+    s.paint(DARK);
+    _ = try waitColor(ID_ARROW, pair.light, 3000);
+    // une entrée de menu inconnue ne change rien
+    _ = w.PostMessageW(hwnd, w.WM_COMMAND, settings.COLOR_MENU_BASE + core.PRESETS.len, 0);
+    w.Sleep(200);
+    try testing.expect(settings.loadColors().eql(pair));
+    // fermeture : le curseur d'origine revient
+    _ = w.PostMessageW(hwnd, w.WM_CLOSE, 0, 0);
+    try testing.expect(p.exitedWithin(5000));
+    try testing.expect((try systemArrow()).sameImage(before));
+
+    // relancé : les couleurs enregistrées sont reprises (le fond est toujours sombre)
+    const p2 = try Proc.startReady();
+    defer p2.kill();
+    _ = try waitColor(ID_ARROW, pair.light, 3000);
+    s.paint(LIGHT);
+    _ = try waitColor(ID_ARROW, pair.dark, 3000);
+    // retour au noir et blanc depuis le menu
+    const hwnd2 = w.FindWindowW(L("AutoCurseur"), null) orelse return error.FenetreIntrouvable;
+    _ = w.PostMessageW(hwnd2, w.WM_COMMAND, settings.COLOR_MENU_BASE, 0);
+    _ = try waitColor(ID_ARROW, core.BLACK, 3000);
+    try testing.expect(settings.loadColors().eql(.{}));
+    _ = w.PostMessageW(hwnd2, w.WM_CLOSE, 0, 0);
+    try testing.expect(p2.exitedWithin(5000));
+    try testing.expect((try systemArrow()).sameImage(before));
+}
+
+extern "user32" fn GetDlgItem(w.HWND, c_int) callconv(.winapi) w.HWND;
+const WM_SETTEXT = 0x000C;
+const IDOK = 1;
+const IDCANCEL = 2;
+/// Champs « rouge », « vert », « bleu » du sélecteur de couleur de Windows (colordlg.h).
+const COLOR_RED = 706;
+const COLOR_GREEN = 707;
+const COLOR_BLUE = 708;
+
+/// Attend (au plus `ms`) une boîte de dialogue de Windows portant ce titre.
+fn waitDialog(title: [*:0]const u16, ms: u32) ?w.HWND {
+    const t0 = w.GetTickCount();
+    while (w.GetTickCount() -% t0 < ms) {
+        if (w.FindWindowW(L("#32770"), title)) |d| return d;
+        w.Sleep(20);
+    }
+    return null;
+}
+
+/// Attend (au plus `ms`) qu'il n'y ait plus de boîte de dialogue portant ce titre.
+fn dialogGone(title: [*:0]const u16, ms: u32) bool {
+    const t0 = w.GetTickCount();
+    while (w.GetTickCount() -% t0 < ms) {
+        if (w.FindWindowW(L("#32770"), title) == null) return true;
+        w.Sleep(20);
+    }
+    return false;
+}
+
+/// Écrit `value` dans le champ `id` du sélecteur de couleur, comme au clavier.
+fn typeField(dlg: w.HWND, id: c_int, value: u8) !void {
+    var txt: [8]u8 = undefined;
+    const s = try std.fmt.bufPrint(&txt, "{d}", .{value});
+    var wide: [8:0]u16 = @splat(0);
+    for (s, 0..) |c, i| wide[i] = c;
+    const field = GetDlgItem(dlg, id) orelse return error.ChampIntrouvable;
+    var r: usize = 0;
+    if (SendMessageTimeoutW(field, WM_SETTEXT, 0, @bitCast(@intFromPtr(&wide)), SMTO_ABORTIFHUNG, 2000, &r) == 0) return error.ChampSansReponse;
+}
+
+/// Choisit la couleur `rgb` dans le sélecteur ouvert et valide.
+fn chooseColor(dlg: w.HWND, rgb: u32) !void {
+    try typeField(dlg, COLOR_RED, @intCast((rgb >> 16) & 255));
+    try typeField(dlg, COLOR_GREEN, @intCast((rgb >> 8) & 255));
+    try typeField(dlg, COLOR_BLUE, @intCast(rgb & 255));
+    _ = w.PostMessageW(dlg, w.WM_COMMAND, IDOK, 0);
+}
+
+/// Attend (au plus `ms`) que les couleurs enregistrées soient `want`.
+fn waitSavedColors(want: core.Colors, ms: u32) bool {
+    const t0 = w.GetTickCount();
+    while (w.GetTickCount() -% t0 < ms) {
+        if (settings.loadColors().eql(want)) return true;
+        w.Sleep(20);
+    }
+    return false;
+}
+
+test "système : couleur personnalisée choisie dans le sélecteur de Windows ; trop proche de l'autre, elle est refusée" {
+    try skipIfRunning();
+    const saved = defaults();
+    defer saved.put();
+    defer restoreFiles();
+    const text = app.i18n.text(app.i18n.resolve(.auto, w.GetUserDefaultUILanguage()));
+    const navy: u32 = 0x00205B;
+
+    const p = try Proc.startReady();
+    defer p.kill();
+    defer cursors.restore();
+    const hwnd = w.FindWindowW(L("AutoCurseur"), null) orelse return error.FenetreIntrouvable;
+
+    // 1. couleur sur fond clair : le sélecteur s'ouvre, titré, centré sur la souris et
+    // entièrement visible sur son écran, et AutoCurseur continue de répondre
+    var orig: core.Point = .{};
+    _ = w.GetCursorPos(&orig);
+    defer _ = w.SetCursorPos(orig.x, orig.y);
+    const c: core.Point = .{ .x = @divTrunc(w.GetSystemMetrics(w.SM_CXSCREEN), 2), .y = @divTrunc(w.GetSystemMetrics(w.SM_CYSCREEN), 2) };
+    _ = w.SetCursorPos(c.x, c.y);
+    _ = w.PostMessageW(hwnd, w.WM_COMMAND, settings.MENU_COLOR_DARK, 0);
+    const dlg = waitDialog(text.pick_dark_title.ptr, 5000) orelse return error.SelecteurAbsent;
+    var mouse: core.Point = .{};
+    _ = w.GetCursorPos(&mouse);
+    var mi: w.MONITORINFO = .{};
+    _ = w.GetMonitorInfoW(w.MonitorFromPoint(mouse, w.MONITOR_DEFAULTTONEAREST), &mi);
+    var r: w.RECT = undefined;
+    _ = w.GetWindowRect(dlg, &r);
+    errdefer std.debug.print("  sélecteur en {d},{d} - {d},{d} ; zone de travail {d},{d} - {d},{d}\n", .{ r.left, r.top, r.right, r.bottom, mi.rcWork.left, mi.rcWork.top, mi.rcWork.right, mi.rcWork.bottom });
+    try testing.expect(r.left >= mi.rcWork.left and r.top >= mi.rcWork.top and r.right <= mi.rcWork.right and r.bottom <= mi.rcWork.bottom);
+    if (mouse.x == c.x and mouse.y == c.y) { // la souris a pu être déplacée : le sélecteur est centré dessus
+        try testing.expect(@abs(@divTrunc(r.left + r.right, 2) - c.x) <= 2);
+        try testing.expect(@abs(@divTrunc(r.top + r.bottom, 2) - c.y) <= 2);
+    }
+    try testing.expect(responds(hwnd));
+    // une deuxième demande pendant que le sélecteur est ouvert n'en ouvre pas un autre
+    _ = w.PostMessageW(hwnd, w.WM_COMMAND, settings.MENU_COLOR_LIGHT, 0);
+    try testing.expect(waitDialog(text.pick_light_title.ptr, 500) == null);
+    try chooseColor(dlg, navy);
+    try testing.expect(waitSavedColors(.{ .dark = navy }, 3000));
+    try testing.expect(dialogGone(text.pick_dark_title.ptr, 3000));
+
+    // 2. couleur sur fond sombre trop sombre : message, et rien ne change
+    _ = w.PostMessageW(hwnd, w.WM_COMMAND, settings.MENU_COLOR_LIGHT, 0);
+    const dlg2 = waitDialog(text.pick_light_title.ptr, 5000) orelse return error.SelecteurAbsent;
+    try chooseColor(dlg2, 0x000080);
+    const box = waitDialog(L("AutoCurseur"), 5000) orelse return error.MessageAbsent;
+    try testing.expect(settings.loadColors().eql(.{ .dark = navy }));
+    _ = w.PostMessageW(box, w.WM_CLOSE, 0, 0);
+    try testing.expect(dialogGone(L("AutoCurseur"), 3000));
+
+    // 3. une couleur claire valide est acceptée
+    _ = w.PostMessageW(hwnd, w.WM_COMMAND, settings.MENU_COLOR_LIGHT, 0);
+    const dlg3 = waitDialog(text.pick_light_title.ptr, 5000) orelse return error.SelecteurAbsent;
+    try chooseColor(dlg3, 0xFFE600);
+    try testing.expect(waitSavedColors(.{ .dark = navy, .light = 0xFFE600 }, 3000));
+
+    // 4. annuler ne change rien
+    _ = w.PostMessageW(hwnd, w.WM_COMMAND, settings.MENU_COLOR_DARK, 0);
+    const dlg4 = waitDialog(text.pick_dark_title.ptr, 5000) orelse return error.SelecteurAbsent;
+    _ = w.PostMessageW(dlg4, w.WM_COMMAND, IDCANCEL, 0);
+    try testing.expect(dialogGone(text.pick_dark_title.ptr, 3000));
+    try testing.expect(settings.loadColors().eql(.{ .dark = navy, .light = 0xFFE600 }));
+
+    // 5. quitter pendant que le sélecteur est ouvert : tout se ferme proprement
+    _ = w.PostMessageW(hwnd, w.WM_COMMAND, settings.MENU_COLOR_DARK, 0);
+    _ = waitDialog(text.pick_dark_title.ptr, 5000) orelse return error.SelecteurAbsent;
     _ = w.PostMessageW(hwnd, w.WM_CLOSE, 0, 0);
     try testing.expect(p.exitedWithin(5000));
 }

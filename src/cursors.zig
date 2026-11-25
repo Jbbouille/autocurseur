@@ -11,6 +11,9 @@
 //!
 //! Quand la couleur voulue change, seul le curseur affiché est rechargé ; chacun des autres
 //! l'est quand il apparaît (voir `show` et `fix`).
+//!
+//! Les deux jeux sont noir et blanc par défaut ; `setColors` leur donne d'autres couleurs
+//! (corps de la couleur choisie, contour blanc ou noir), dans des fichiers 32 bits.
 
 const std = @import("std");
 const core = @import("core.zig");
@@ -90,6 +93,57 @@ var ready_v: [SET_COUNT][COUNT]bool = @splat(@splat(false));
 var prepared_v: [SET_COUNT]bool = @splat(false);
 /// curseurs dessinés à partir des dessins vectoriels (pointeur agrandi), sinon classiques
 var vector = false;
+/// couleur du corps des jeux `.black` (sur fond clair) et `.white` (sur fond sombre)
+var colors: core.Colors = .{};
+/// couleur du corps du jeu `.red` (curseur agrandi quand on secoue la souris)
+var shake_color: u32 = core.RED;
+
+// ---------------------------------------------------------------- couleurs
+
+/// Change les couleurs des deux jeux. Les fichiers fabriqués ne valent plus : ils sont refaits
+/// par `prepare` (et `prepareVector` pour un pointeur agrandi), appelés au besoin au prochain
+/// chargement.
+pub fn setColors(c: core.Colors) void {
+    if (colors.eql(c)) return;
+    colors = c;
+    shake_color = core.shakeColor(c);
+    ready = @splat(@splat(false));
+    prepared = @splat(false);
+    ready_v = @splat(@splat(false));
+    prepared_v = @splat(false);
+}
+
+pub fn currentColors() core.Colors {
+    return colors;
+}
+
+/// Couleur du curseur agrandi (rouge, sauf si une des deux couleurs lui ressemble).
+pub fn shakeColor() u32 {
+    return shake_color;
+}
+
+/// Couleur du corps des curseurs du jeu `set`.
+fn bodyColor(set: Set) u32 {
+    return switch (set) {
+        .black => colors.dark,
+        .white => colors.light,
+        .red => shake_color,
+    };
+}
+
+/// Couleur du contour : à l'opposé du corps, pour rester visible sur tous les fonds.
+fn outlineColor(set: Set) u32 {
+    return if (set == .white) core.BLACK else core.WHITE;
+}
+
+/// Le jeu `set` a-t-il ses couleurs d'origine, noir ou blanc ? (jamais le rouge)
+fn isPlain(set: Set) bool {
+    return switch (set) {
+        .black => colors.dark == core.BLACK,
+        .white => colors.light == core.WHITE,
+        .red => false,
+    };
+}
 
 // ---------------------------------------------------------------- tailles
 
@@ -177,13 +231,10 @@ fn sourcePath(buf: []u16, i: usize) [:0]const u16 {
     return core.join(buf, &.{ windir[0..windir_len], L("\\Cursors\\"), defs[i].file });
 }
 
-/// Le jeu `set` du curseur `i` est-il fourni tel quel par Windows ?
+/// Le jeu `set` du curseur `i` est-il fourni tel quel par Windows ? (noir ou blanc d'origine
+/// seulement : un jeu d'une autre couleur est entièrement fabriqué)
 fn isNative(set: Set, i: usize) bool {
-    return switch (set) {
-        .black => !defs[i].file_is_white,
-        .white => defs[i].file_is_white,
-        .red => false,
-    };
+    return isPlain(set) and defs[i].file_is_white == (set == .white);
 }
 
 /// Fichier du jeu `set` pour le curseur `i` : celui de Windows ou celui fabriqué ; null si
@@ -246,10 +297,14 @@ fn writeFile(path: [:0]const u16, data: []const u8) bool {
 /// Fabrique le fichier du jeu `set` pour le curseur `i` à partir de `src` (contenu du
 /// fichier de Windows). Renvoie le nombre de fichiers écrits (0 s'il était déjà à jour).
 fn produce(src: []const u8, set: Set, i: usize) usize {
-    const op: curfile.Op = switch (set) {
-        .black, .white => .invert,
-        .red => if (defs[i].file_is_white) .invert_red else .red,
-    };
+    // noir ou blanc d'origine : simple inversion du fichier de Windows, dans son format ;
+    // sinon teinte en 32 bits, le corps du dessin étant blanc ou noir selon le fichier
+    const op: curfile.Op = if (isPlain(set))
+        .invert
+    else if (defs[i].file_is_white)
+        .{ .tint = .{ .at0 = outlineColor(set), .at255 = bodyColor(set) } }
+    else
+        .{ .tint = .{ .at0 = bodyColor(set), .at255 = outlineColor(set) } };
     const s = @backingInt(set);
     ready[s][i] = false;
     const len = curfile.derive(src, op, &out_buf) orelse return 0;
@@ -278,20 +333,36 @@ fn removeObsolete() void {
     }
 }
 
+/// Supprime les fichiers fabriqués qui doublent un fichier de Windows utilisé tel quel (restes
+/// d'un jeu d'une autre couleur, après un retour au noir ou au blanc).
+fn removeUnused() void {
+    for (defs, 0..) |d, i| {
+        for ([_]Set{ .black, .white }) |set| {
+            if (!isNative(set, i)) continue;
+            _ = w.DeleteFileW(core.join(&path_buf, &.{ dir[0..dir_len], prefixes[@backingInt(set)], d.file }).ptr);
+        }
+    }
+}
+
 /// Fabrique les fichiers qui ne sont pas fournis tels quels par Windows : la version
-/// inversée des jeux noir et blanc, et le jeu rouge si `with_red`. Un fichier déjà à jour
-/// n'est pas réécrit. Renvoie le nombre de fichiers écrits.
+/// inversée ou teintée des jeux noir et blanc, et le jeu rouge si `with_red`. Un fichier
+/// déjà à jour n'est pas réécrit. Renvoie le nombre de fichiers écrits.
 pub fn prepare(with_red: bool) usize {
     if (dir_len == 0 and !useDefaultDir()) return 0;
     var written: usize = 0;
-    for (defs, 0..) |d, i| {
+    for (0..COUNT) |i| {
         const n = readFile(sourcePath(&path_buf, i).ptr, &src_buf) orelse continue;
         const src = src_buf[0..n];
-        written += produce(src, if (d.file_is_white) .black else .white, i);
+        for ([_]Set{ .black, .white }) |set| {
+            if (!isNative(set, i)) written += produce(src, set, i);
+        }
         if (with_red) written += produce(src, .red, i);
     }
-    // de nouveaux fichiers écrits : peut-être une mise à jour, les anciens ne servent plus
-    if (written > 0) removeObsolete();
+    // de nouveaux fichiers écrits (mise à jour, autres couleurs) : les anciens ne servent plus
+    if (written > 0) {
+        removeObsolete();
+        removeUnused();
+    }
     prepared[@backingInt(Set.black)] = true;
     prepared[@backingInt(Set.white)] = true;
     if (with_red) prepared[@backingInt(Set.red)] = true;
@@ -324,6 +395,19 @@ fn storeVector(set: Set, i: usize, data: []const u8) usize {
     return @intFromBool(ready_v[s][i]);
 }
 
+/// Dessine `svg` (corps noir, contour blanc) et écrit sa version teintée aux couleurs du jeu
+/// `set`, en 32 bits (bords adoucis gardés). La teinte se fait sur place : un dessin par jeu.
+/// Renvoie le nombre de fichiers écrits.
+fn tintedVector(r: *svgcur.Renderer, svg: []const u8, set: Set, i: usize) usize {
+    if (!r.draw(svg)) return 0;
+    const px = r.pixels();
+    for (px) |*p| p.* = svgcur.unpremultiply(p.*);
+    core.tintColorPixels(px, svgcur.SIZE, &.{}, 0, bodyColor(set), outlineColor(set));
+    const sh = svgcur.shapes[i];
+    const len = curfile.colorFile(&out_buf, svgcur.SIZE, sh.hot_x, sh.hot_y, px) orelse return 0;
+    return storeVector(set, i, out_buf[0..len]);
+}
+
 /// Fabrique les fichiers des jeux noir et blanc (et rouge si `with_red`) à partir des dessins
 /// vectoriels de Windows 11, comme Windows pour ses pointeurs agrandis (voir svgcur.zig).
 /// Direct2D n'est chargé que pendant ce travail. Ne refait rien de ce qui est déjà prêt.
@@ -337,27 +421,29 @@ pub fn prepareVector(with_red: bool) usize {
     var r = svgcur.Renderer.init() orelse return 0;
     defer r.deinit();
     const S = svgcur.SIZE;
+    // noir et blanc d'origine : images 1 bit, comme celles que Windows fabrique
+    const plain_black = need_bw and isPlain(.black);
+    const plain_white = need_bw and isPlain(.white);
     var written: usize = 0;
     for (svgcur.shapes, 0..) |sh, i| {
         const src_path = core.join(&path_buf, &.{ windir[0..windir_len], L("\\Cursors\\"), sh.name, L(".svg") });
         const n = readFile(src_path.ptr, &svg_buf) orelse continue;
-        svgcur.colorize(svg_buf[0..n], "000000", "FFFFFF"); // corps noir, contour blanc
-        if (!r.draw(svg_buf[0..n])) continue;
-        if (need_bw) {
+        const svg = svg_buf[0..n];
+        svgcur.colorize(svg, "000000", "FFFFFF"); // corps noir, contour blanc
+        if (plain_black or plain_white) {
+            if (!r.draw(svg)) continue;
             svgcur.toMono(r.pixels(), S, &mono_xor, &mono_and);
             const len = curfile.monoFile(&out_buf, S, sh.hot_x, sh.hot_y, &mono_xor, &mono_and) orelse continue;
-            written += storeVector(.black, i, out_buf[0..len]);
-            @memcpy(src_buf[0..len], out_buf[0..len]);
-            const wl = curfile.derive(src_buf[0..len], .invert, &out_buf) orelse continue;
-            written += storeVector(.white, i, out_buf[0..wl]);
+            if (plain_black) written += storeVector(.black, i, out_buf[0..len]);
+            if (plain_white) {
+                @memcpy(src_buf[0..len], out_buf[0..len]);
+                const wl = curfile.derive(src_buf[0..len], .invert, &out_buf) orelse continue;
+                written += storeVector(.white, i, out_buf[0..wl]);
+            }
         }
-        if (need_red) {
-            const px = r.pixels();
-            for (px) |*p| p.* = svgcur.unpremultiply(p.*);
-            core.reddenColorPixels(px, S, &.{}, 0); // bords adoucis gardés
-            const len = curfile.colorFile(&out_buf, S, sh.hot_x, sh.hot_y, px) orelse continue;
-            written += storeVector(.red, i, out_buf[0..len]);
-        }
+        if (need_bw and !isPlain(.black)) written += tintedVector(&r, svg, .black, i);
+        if (need_bw and !isPlain(.white)) written += tintedVector(&r, svg, .white, i);
+        if (need_red) written += tintedVector(&r, svg, .red, i);
     }
     if (need_bw) {
         prepared_v[@backingInt(Set.black)] = true;

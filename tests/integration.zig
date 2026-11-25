@@ -314,7 +314,7 @@ test "la taille choisie est exactement celle des curseurs de Windows" {
 
 test "l'icône de notification est créée, avec transparence et deux tons" {
     for ([_]bool{ true, false }) |on| {
-        const ico = app.icon.create(on) orelse return error.Icon;
+        const ico = app.icon.create(on, .{}) orelse return error.Icon;
         defer _ = w.DestroyIcon(ico);
         const s = try h.stats(ico);
         try testing.expect(s.opaque_px > 0);
@@ -839,4 +839,232 @@ test "fil de lecture : répond, ne garde que la dernière demande, s'arrête pro
     try collect(hwnd, 1000, true, &got);
     try testing.expectEqual(@as(usize, 1), got.items.len);
     sampler.deinit();
+}
+
+// ---------------------------------------------------------------------
+// Couleurs choisies pour les deux jeux
+// ---------------------------------------------------------------------
+
+const NAVY_YELLOW: core.Colors = core.PRESETS[1];
+
+/// Dossier temporaire pour les fichiers fabriqués d'un test (ceux de l'application ne sont
+/// pas touchés). `leave` remet le dossier et les couleurs de l'application.
+const TempDir = struct {
+    fn enter(comptime tag: []const u8) !void {
+        var name: [64]u16 = undefined;
+        var num: [16]u8 = undefined;
+        const tick = try std.fmt.bufPrint(&num, "{d}", .{w.GetTickCount()});
+        var n: usize = 0;
+        for (L("AutoCurseur-tests\\" ++ tag ++ "-")) |c| {
+            name[n] = c;
+            n += 1;
+        }
+        for (tick) |c| {
+            name[n] = c;
+            n += 1;
+        }
+        try testing.expect(cursors.setDir(L("TEMP"), name[0..n]));
+    }
+
+    fn leave() void {
+        h.removeDir(cursors.dirPath());
+        cursors.useVector(false);
+        cursors.setColors(.{});
+        _ = cursors.useDefaultDir();
+    }
+};
+
+/// Le chemin `path` est-il dans le dossier des fichiers fabriqués ?
+fn isMade(path: []const u16) bool {
+    return std.mem.startsWith(u16, path, cursors.dirPath());
+}
+
+test "couleurs : les deux jeux sont fabriqués aux couleurs choisies, contour de la couleur opposée" {
+    h.dpiAware();
+    defer cursors.free();
+    // forme de référence : la flèche et la sélection de texte en noir et blanc
+    cursors.load(48);
+    const ref_arrow = try h.stats(cursors.black[0]);
+    const ref_beam = try h.stats(cursors.black[1]);
+    cursors.free();
+
+    try TempDir.enter("couleurs");
+    defer TempDir.leave();
+    cursors.setColors(NAVY_YELLOW);
+    try testing.expect(cursors.currentColors().eql(NAVY_YELLOW));
+
+    // aucun fichier de Windows ne sert tel quel : 17 sombres + 17 clairs + 17 rouges
+    try testing.expectEqual(@as(usize, 3 * cursors.COUNT), cursors.prepare(true));
+    try testing.expectEqual(@as(usize, 0), cursors.prepare(true)); // déjà à jour
+    try testing.expectEqual(@as(usize, 3 * cursors.COUNT), h.fileCount(cursors.dirPath()));
+    var p: [2 * w.MAX_PATH]u16 = undefined;
+    for (0..cursors.COUNT) |i| {
+        for ([_]cursors.Set{ .black, .white, .red }) |set| try testing.expect(isMade(cursors.pathOf(set, i, &p).?));
+    }
+
+    cursors.load(48);
+    for ([_]usize{ 0, 1 }, [_]h.Stats{ ref_arrow, ref_beam }) |i, ref| {
+        errdefer std.debug.print("  curseur n° {d}\n", .{i});
+        const dark = cursors.black[i];
+        const light = cursors.white[i];
+        // jeu sombre : corps bleu nuit, contour blanc, plus aucun noir
+        try testing.expect(try h.colorCount(dark, NAVY_YELLOW.dark) > 20);
+        try testing.expect(try h.colorNear(dark, core.WHITE, 60) > 20);
+        try testing.expectEqual(@as(usize, 0), try h.colorNear(dark, core.BLACK, 60));
+        // jeu clair : corps jaune, contour noir, plus aucun blanc
+        try testing.expect(try h.colorCount(light, NAVY_YELLOW.light) > 20);
+        try testing.expect(try h.colorNear(light, core.BLACK, 60) > 20);
+        try testing.expectEqual(@as(usize, 0), try h.colorNear(light, core.WHITE, 60));
+        // même dessin et même point chaud qu'en noir et blanc
+        for ([_]w.HCURSOR{ dark, light }) |c| {
+            const s = try h.stats(c);
+            try testing.expect(!s.mono);
+            try testing.expectEqual(ref.opaque_px, s.opaque_px);
+            try testing.expectEqual(ref.hot_x, s.hot_x);
+            try testing.expectEqual(ref.hot_y, s.hot_y);
+            try testing.expectEqual(ref.width, s.width);
+        }
+        // le corps du jeu sombre et celui du jeu clair occupent les mêmes pixels
+        try testing.expectEqual(try h.colorCount(dark, NAVY_YELLOW.dark), try h.colorCount(light, NAVY_YELLOW.light));
+    }
+    // les couleurs franches sont gardées : le rouge de « indisponible » dans les deux jeux
+    const no = for (cursors.defs, 0..) |d, i| {
+        if (d.id == 32648) break i;
+    } else unreachable;
+    const red_dark = (try h.redStats(cursors.black[no])).red_px;
+    try testing.expect(red_dark > 20);
+    try testing.expectEqual(red_dark, (try h.redStats(cursors.white[no])).red_px);
+}
+
+test "couleurs : une seule couleur changée, l'autre jeu garde les fichiers de Windows" {
+    h.dpiAware();
+    defer cursors.free();
+    try TempDir.enter("une-couleur");
+    defer TempDir.leave();
+    cursors.setColors(.{ .dark = NAVY_YELLOW.dark });
+    // 17 sombres teintés + 4 clairs inversés (jeu « Windows Black ») + 17 rouges
+    var native_white: usize = 0;
+    for (cursors.defs) |d| native_white += @intFromBool(d.file_is_white);
+    try testing.expectEqual(@as(usize, 2 * cursors.COUNT + (cursors.COUNT - native_white)), cursors.prepare(true));
+    var p: [2 * w.MAX_PATH]u16 = undefined;
+    for (cursors.defs, 0..) |d, i| {
+        try testing.expect(isMade(cursors.pathOf(.black, i, &p).?));
+        try testing.expectEqual(!d.file_is_white, isMade(cursors.pathOf(.white, i, &p).?));
+    }
+    cursors.load(48);
+    try testing.expect(try h.colorCount(cursors.black[0], NAVY_YELLOW.dark) > 20);
+    try testing.expect(try h.colorCount(cursors.white[0], core.WHITE) > 20); // flèche blanche de Windows
+}
+
+test "couleurs : retour au noir et blanc, les fichiers de Windows resservent et les doublons sont supprimés" {
+    h.dpiAware();
+    defer cursors.free();
+    cursors.load(48);
+    const ref_black = try h.stats(cursors.black[0]);
+    const ref_white = try h.stats(cursors.white[0]);
+    cursors.free();
+
+    try TempDir.enter("retour");
+    defer TempDir.leave();
+    cursors.setColors(NAVY_YELLOW);
+    _ = cursors.prepare(true);
+    try testing.expectEqual(@as(usize, 3 * cursors.COUNT), h.fileCount(cursors.dirPath()));
+
+    cursors.setColors(.{});
+    // les 17 versions inversées sont refaites (le rouge n'a pas changé)
+    try testing.expectEqual(@as(usize, cursors.COUNT), cursors.prepare(true));
+    // il ne reste que les 17 inversés et les 17 rouges
+    try testing.expectEqual(@as(usize, 2 * cursors.COUNT), h.fileCount(cursors.dirPath()));
+    var p: [2 * w.MAX_PATH]u16 = undefined;
+    for (cursors.defs, 0..) |d, i| {
+        try testing.expectEqual(d.file_is_white, isMade(cursors.pathOf(.black, i, &p).?));
+        try testing.expectEqual(!d.file_is_white, isMade(cursors.pathOf(.white, i, &p).?));
+    }
+    cursors.load(48);
+    try testing.expect((try h.stats(cursors.black[0])).sameImage(ref_black));
+    try testing.expect((try h.stats(cursors.white[0])).sameImage(ref_white));
+    try testing.expectEqual(@as(usize, 0), try h.colorCount(cursors.black[0], NAVY_YELLOW.dark));
+}
+
+test "couleurs : le curseur agrandi change de couleur quand le rouge ressemble à une des deux" {
+    h.dpiAware();
+    defer cursors.freeRed();
+    try testing.expectEqual(core.RED, cursors.shakeColor());
+    try TempDir.enter("secousse");
+    defer TempDir.leave();
+    const reddish: core.Colors = .{ .dark = 0xB00020, .light = core.WHITE };
+    cursors.setColors(reddish);
+    const shake = cursors.shakeColor();
+    try testing.expect(shake != core.RED);
+    _ = cursors.prepare(true);
+    cursors.loadRed(48);
+    // flèche agrandie : corps de la couleur de secousse, contour blanc, sans rouge
+    try testing.expect(try h.colorCount(cursors.red[0], shake) > 50);
+    try testing.expect(try h.colorNear(cursors.red[0], core.WHITE, 60) > 50);
+    try testing.expectEqual(@as(usize, 0), try h.colorNear(cursors.red[0], core.RED, 60));
+    // retour à des couleurs sans rouge : le curseur agrandi redevient rouge
+    cursors.setColors(NAVY_YELLOW);
+    try testing.expectEqual(core.RED, cursors.shakeColor());
+}
+
+test "couleurs : pointeur agrandi, les dessins vectoriels sont teintés en 32 bits, même forme" {
+    try skipWithoutVectorShapes();
+    // forme de référence : la flèche noire d'origine (1 bit)
+    _ = cursors.prepareVector(false);
+    const ref_file = try vectorFile(.black, 0);
+    defer testing.allocator.free(ref_file);
+    const ref = curfile.frame(ref_file, 0).?;
+
+    try TempDir.enter("vectoriel");
+    defer TempDir.leave();
+    cursors.setColors(NAVY_YELLOW);
+    try testing.expectEqual(@as(usize, 3 * cursors.COUNT), cursors.prepareVector(true));
+    try testing.expectEqual(@as(usize, 0), cursors.prepareVector(true));
+    try testing.expect(cursors.vectorReady());
+    for (0..cursors.COUNT) |i| {
+        for ([_]cursors.Set{ .black, .white }) |set| {
+            const file = try vectorFile(set, i);
+            defer testing.allocator.free(file);
+            const f = curfile.frame(file, 0) orelse return error.ImageIllisible;
+            try testing.expectEqual(@as(u16, 32), f.bpp);
+            try testing.expectEqual(@as(usize, svgcur.SIZE), f.w);
+            try testing.expectEqual(svgcur.shapes[i].hot_x, f.hot_x);
+            try testing.expectEqual(svgcur.shapes[i].hot_y, f.hot_y);
+            // corps de la couleur du jeu, contour de la couleur opposée
+            const body: u32 = if (set == .black) NAVY_YELLOW.dark else NAVY_YELLOW.light;
+            const outline: u32 = if (set == .black) core.WHITE else core.BLACK;
+            var n_body: usize = 0;
+            var n_outline: usize = 0;
+            for (std.mem.bytesAsSlice(u32, f.xor_bits)) |c| {
+                if (c >> 24 != 255) continue;
+                if (c & 0xFFFFFF == body) n_body += 1;
+                if (c & 0xFFFFFF == outline) n_outline += 1;
+            }
+            errdefer std.debug.print("  curseur n° {d}, jeu {s} : {d} pixels du corps, {d} du contour\n", .{ i, @tagName(set), n_body, n_outline });
+            try testing.expect(n_body > 300 and n_outline > 300);
+            // mêmes pixels visibles que la version d'origine
+            if (i == 0) {
+                for (0..f.w) |y| {
+                    for (0..f.w) |x| try testing.expectEqual(visibleAt(ref, x, y), visibleAt(f, x, y));
+                }
+            }
+        }
+    }
+    // une seule couleur changée : l'autre jeu reste en 1 bit, comme ceux de Windows
+    cursors.setColors(.{ .light = NAVY_YELLOW.light });
+    _ = cursors.prepareVector(false);
+    const plain = try vectorFile(.black, 0);
+    defer testing.allocator.free(plain);
+    try testing.expectEqual(@as(u16, 1), curfile.frame(plain, 0).?.bpp);
+    try testing.expectEqualSlices(u8, ref_file, plain);
+    const tinted = try vectorFile(.white, 0);
+    defer testing.allocator.free(tinted);
+    try testing.expectEqual(@as(u16, 32), curfile.frame(tinted, 0).?.bpp);
+    // les curseurs teintés se chargent à toutes les tailles
+    cursors.useVector(true);
+    for ([_]i32{ 32, 48, 64, 128, 256 }) |px| {
+        const c = cursors.loadOne(.white, 0, px) orelse return error.Chargement;
+        defer _ = w.DestroyCursor(c);
+        try testing.expectEqual(px, (try h.stats(c)).width);
+    }
 }

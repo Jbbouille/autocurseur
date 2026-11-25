@@ -11,6 +11,7 @@ pub const sampler = @import("sampler.zig");
 pub const icon = @import("icon.zig");
 pub const settings = @import("settings.zig");
 pub const i18n = @import("i18n.zig");
+pub const colorpick = @import("colorpick.zig");
 
 test {
     // inclut les tests unitaires de chaque fichier
@@ -23,14 +24,15 @@ test {
     _ = icon;
     _ = settings;
     _ = i18n;
+    _ = colorpick;
 }
 
 test "aucune allocation dynamique dans le code de l'application" {
     const sources = [_][]const u8{
-        @embedFile("main.zig"),     @embedFile("core.zig"), @embedFile("cursors.zig"),
-        @embedFile("sampler.zig"),  @embedFile("icon.zig"), @embedFile("win32.zig"),
-        @embedFile("settings.zig"), @embedFile("i18n.zig"), @embedFile("curfile.zig"),
-        @embedFile("svgcur.zig"),
+        @embedFile("main.zig"),     @embedFile("core.zig"),      @embedFile("cursors.zig"),
+        @embedFile("sampler.zig"),  @embedFile("icon.zig"),      @embedFile("win32.zig"),
+        @embedFile("settings.zig"), @embedFile("i18n.zig"),      @embedFile("curfile.zig"),
+        @embedFile("svgcur.zig"),   @embedFile("colorpick.zig"),
     };
     // motifs assemblés à la compilation pour ne pas apparaître tels quels dans ce fichier
     const banned = [_][]const u8{

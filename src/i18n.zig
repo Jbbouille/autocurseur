@@ -55,6 +55,16 @@ pub const Text = struct {
     rates: [core.RATES.len][:0]const u16,
     language_menu: [:0]const u16,
     language_auto: [:0]const u16,
+    colors_menu: [:0]const u16,
+    /// Libellés des couples de couleurs, dans l'ordre de core.PRESETS.
+    presets: [core.PRESETS.len][:0]const u16,
+    /// Entrées qui ouvrent le sélecteur de couleur de Windows, et titres de celui-ci.
+    color_dark: [:0]const u16,
+    color_light: [:0]const u16,
+    pick_dark_title: [:0]const u16,
+    pick_light_title: [:0]const u16,
+    /// Message quand la couleur choisie ne se distingue pas assez de l'autre.
+    colors_too_close: [:0]const u16,
     shake: [:0]const u16,
     startup: [:0]const u16,
     quit: [:0]const u16,
@@ -67,6 +77,13 @@ pub const en: Text = .{
     .rates = .{ L("3"), L("5"), L("10 (default)"), L("20") },
     .language_menu = L("Language"),
     .language_auto = L("Automatic (Windows language)"),
+    .colors_menu = L("Colors"),
+    .presets = .{ L("Black / White (default)"), L("Navy / Yellow"), L("Dark green / Light green"), L("Purple / Pink") },
+    .color_dark = L("Over light backgrounds…"),
+    .color_light = L("Over dark backgrounds…"),
+    .pick_dark_title = L("Pointer color over light backgrounds"),
+    .pick_light_title = L("Pointer color over dark backgrounds"),
+    .colors_too_close = L("These two colors are too close. The pointer needs a dark color over light backgrounds and a light color over dark backgrounds.\n\nThe color was not changed."),
     .shake = L("Shake to find the pointer (bigger, in red)"),
     .startup = L("Start with Windows"),
     .quit = L("Quit"),
@@ -79,6 +96,13 @@ pub const fr: Text = .{
     .rates = .{ L("3"), L("5"), L("10 (par défaut)"), L("20") },
     .language_menu = L("Langue"),
     .language_auto = L("Automatique (langue de Windows)"),
+    .colors_menu = L("Couleurs"),
+    .presets = .{ L("Noir / Blanc (par défaut)"), L("Bleu nuit / Jaune"), L("Vert sapin / Vert clair"), L("Violet / Rose") },
+    .color_dark = L("Sur fond clair…"),
+    .color_light = L("Sur fond sombre…"),
+    .pick_dark_title = L("Couleur du curseur sur fond clair"),
+    .pick_light_title = L("Couleur du curseur sur fond sombre"),
+    .colors_too_close = L("Ces deux couleurs sont trop proches. Il faut une couleur sombre sur fond clair et une couleur claire sur fond sombre.\n\nLa couleur n'a pas été changée."),
     .shake = L("Secouer pour retrouver le curseur (agrandi, en rouge)"),
     .startup = L("Lancer au démarrage de Windows"),
     .quit = L("Quitter"),
@@ -154,7 +178,14 @@ test "textes : tous présents, sans espace en trop, et traduits" {
             checked += 1;
         }
     }
-    try testing.expectEqual(info.field_names.len - 1, checked); // tous sauf `rates`
+    try testing.expectEqual(info.field_names.len - 2, checked); // tous sauf `rates` et `presets`
+    // couples de couleurs : un libellé par couple, traduit, seul le premier annoté « par défaut »
+    for (en.presets, fr.presets, 0..) |a, b, i| {
+        try testing.expect(a.len > 0 and b.len > 0);
+        try testing.expect(!std.mem.eql(u16, a, b));
+        try testing.expectEqual(i == 0, std.mem.indexOfScalar(u16, a, '(') != null);
+        try testing.expectEqual(i == 0, std.mem.indexOfScalar(u16, b, '(') != null);
+    }
 }
 
 test "textes : l'info-bulle tient dans les 128 caractères de Windows" {

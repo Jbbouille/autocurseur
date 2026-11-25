@@ -1,5 +1,5 @@
 //! Fichiers de curseurs (.cur) : lit les images d'un fichier de Windows et écrit un fichier
-//! dérivé (inversé ou rouge) qui garde toutes ses tailles. Windows choisit ensuite lui-même,
+//! dérivé (inversé ou teinté) qui garde toutes ses tailles. Windows choisit ensuite lui-même,
 //! écran par écran, l'image de la bonne taille : le curseur reste net partout, même quand
 //! les écrans n'ont pas le même agrandissement.
 //!
@@ -13,15 +13,21 @@ const std = @import("std");
 const core = @import("core.zig");
 const testing = std.testing;
 
-pub const Op = enum {
+/// Teinte : couleur (0xRRGGBB) donnée au noir et couleur donnée au blanc de l'image d'origine.
+pub const Tint = struct { at0: u32, at255: u32 };
+
+pub const Op = union(enum) {
     /// recopie
     copy,
-    /// noir <-> blanc
+    /// noir <-> blanc, dans le même format (1 bit ou 32 bits)
     invert,
-    /// version rouge d'une image noire
-    red,
-    /// version rouge d'une image blanche (inversée d'abord)
-    invert_red,
+    /// version teintée, toujours en 32 bits (voir core.tint)
+    tint: Tint,
+
+    /// version rouge d'une image noire (corps noir -> rouge, contour blanc gardé)
+    pub const red: Op = .{ .tint = .{ .at0 = core.RED, .at255 = core.WHITE } };
+    /// version rouge d'une image blanche (corps blanc -> rouge, contour noir -> blanc)
+    pub const invert_red: Op = .{ .tint = .{ .at0 = core.WHITE, .at255 = core.RED } };
 };
 
 pub const MAX_FRAMES = 16;
@@ -120,7 +126,7 @@ pub fn frame(src: []const u8, i: usize) ?Frame {
 fn outBpp(f: Frame, op: Op) u16 {
     return switch (op) {
         .copy, .invert => f.bpp,
-        .red, .invert_red => 32,
+        .tint => 32,
     };
 }
 
@@ -165,15 +171,13 @@ fn writeFrame(f: Frame, op: Op, dst: []u8) void {
                 core.invertColorPixels(pixels(xor_out), f.w, f.and_bits, mask_stride);
             }
         },
-        .red, .invert_red => {
+        .tint => |t| {
             const px = pixels(xor_out);
             if (f.bpp == 1) {
-                // inverser une image 1 bit revient à lire sa palette à l'envers
-                core.monoToRed(f.and_bits, f.xor_bits, mask_stride, f.w, f.h, f.one_is_white != (op == .invert_red), px);
+                core.monoToColor(f.and_bits, f.xor_bits, mask_stride, f.w, f.h, f.one_is_white, t.at0, t.at255, px);
             } else {
                 @memcpy(xor_out, f.xor_bits);
-                if (op == .invert_red) core.invertColorPixels(px, f.w, f.and_bits, mask_stride);
-                core.reddenColorPixels(px, f.w, f.and_bits, mask_stride);
+                core.tintColorPixels(px, f.w, f.and_bits, mask_stride, t.at0, t.at255);
             }
         },
     }
@@ -495,6 +499,44 @@ test "derive : palette inversée (index 1 = noir) respectée par le rouge" {
     // le contour (bit 1) est maintenant noir -> rouge ; le corps (bit 0) blanc
     try testing.expectEqual(@as(u32, 0xFF000000 | core.RED), px[0]);
     try testing.expectEqual(@as(u32, 0xFFFFFFFF), px[1 * 32 + 1]);
+}
+
+test "derive : teinte d'une image 1 bit ou 32 bits, corps et contour aux couleurs demandées" {
+    for ([_]u16{ 1, 32 }) |bpp| {
+        const src = makeCur(&test_src, &.{ 32, 48 }, bpp);
+        const len = derive(src, .{ .tint = .{ .at0 = 0x00205B, .at255 = core.WHITE } }, &test_out).?;
+        try testing.expectEqual(@as(?usize, 2), frameCount(test_out[0..len]));
+        const f = frame(test_out[0..len], 0).?;
+        try testing.expectEqual(@as(u16, 32), f.bpp);
+        try testing.expectEqual(@as(u16, 1), f.hot_x);
+        try testing.expectEqual(@as(u16, 2), f.hot_y);
+        const px = std.mem.bytesAsSlice(u32, f.xor_bits);
+        try testing.expectEqual(@as(u32, 0xFFFFFFFF), px[0]); // contour gardé blanc
+        try testing.expectEqual(@as(u32, 0xFF00205B), px[1 * 32 + 1]); // corps bleu nuit
+        try testing.expectEqual(@as(u32, 0), px[31]); // marge transparente
+        // corps clair, contour noir : la version pour les fonds sombres
+        const len2 = derive(src, .{ .tint = .{ .at0 = 0xFFE600, .at255 = core.BLACK } }, &test_out).?;
+        const px2 = std.mem.bytesAsSlice(u32, frame(test_out[0..len2], 0).?.xor_bits);
+        try testing.expectEqual(@as(u32, 0xFF000000), px2[0]);
+        try testing.expectEqual(@as(u32, 0xFFFFE600), px2[1 * 32 + 1]);
+    }
+}
+
+test "derive : teinter le noir en blanc et le blanc en noir revient à inverser une image 32 bits" {
+    const src = makeCur(&test_src, &.{ 32, 48 }, 32);
+    const a = derive(src, .invert, &test_out).?;
+    const b = derive(src, .{ .tint = .{ .at0 = core.WHITE, .at255 = core.BLACK } }, &test_out2).?;
+    try testing.expectEqualSlices(u8, test_out[0..a], test_out2[0..b]);
+}
+
+test "derive : la même teinte, couleurs échangées, sur l'image inversée donne le même fichier" {
+    for ([_]u16{ 1, 32 }) |bpp| {
+        const src = makeCur(&test_src, &.{ 32, 48 }, bpp);
+        const inv = derive(src, .invert, &test_out).?;
+        const a = derive(test_out[0..inv], .{ .tint = .{ .at0 = core.WHITE, .at255 = 0x4B0082 } }, &test_out2).?;
+        const b = derive(src, .{ .tint = .{ .at0 = 0x4B0082, .at255 = core.WHITE } }, &test_out).?;
+        try testing.expectEqualSlices(u8, test_out[0..b], test_out2[0..a]);
+    }
 }
 
 test "monoFile : une image 1 bit relue à l'identique, point chaud et palette compris" {

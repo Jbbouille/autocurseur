@@ -4,9 +4,9 @@
 
 **English** · [Français](README.fr.md)
 
-A tiny Windows tray utility written in Zig: the whole mouse pointer turns **black over light backgrounds** and **white over dark ones**. Shake the mouse and the pointer grows and turns red so you can find it.
+A tiny Windows tray utility written in Zig: the whole mouse pointer turns **black over light backgrounds** and **white over dark ones**. Black and white can be replaced by two colors of your choice. Shake the mouse and the pointer grows and turns red so you can find it.
 
-Native code, about 100 KB, no dynamic memory allocation, about 0.2 % of one CPU core.
+Native code, about 105 KB, no dynamic memory allocation, about 0.2 % of one CPU core.
 
 ## Why
 
@@ -24,6 +24,7 @@ A round half-black, half-white icon appears in the notification area:
   - *Active*;
   - *Checks per second (while the mouse moves)*: 3, 5, 10 (default) or 20;
   - *Language*: automatic (follows Windows), English or Français;
+  - *Colors*: black / white (default), three other pairs, or your own two colors;
   - *Shake to find the pointer (bigger, in red)*: on by default;
   - *Start with Windows*;
   - *Quit*;
@@ -47,6 +48,7 @@ A service would not work anyway: it runs outside your session and can neither se
 4. It decides with **hysteresis**:
    - from 150 up, the pointer turns black;
    - at 105 or below, it turns white;
+   - with other colors than black and white, the two thresholds follow them (see *Choosing the two colors*);
    - in between, it does not change. This avoids flicker over mid grays and along a boundary.
 5. It changes the color of **the pointer on screen only**. Windows has 17 pointers (arrow, text selection, link hand, resize arrows…); AutoCurseur remembers the color of each one, and Windows notifies it whenever the pointer shape changes: the new shape gets the right color right away (well under a hundredth of a second). The checks above also look at the displayed pointer, in case a notification is lost.
 
@@ -71,6 +73,19 @@ The pointers have the shape of Windows' usual white pointers ("Windows Aero", wi
 The "Windows Black" arrow, used until version 0.1.0, had a longer tail and stair-stepped edges, and when it gave way to the text selection pointer it left a visible trace on screen. The white style arrow, in black, leaves none.
 
 The pointer **size** is the size of the arrow Windows is displaying at that moment. At 250 % display scaling, Windows uses 64 px, not 32 × 2.5 = 80.
+
+## Choosing the two colors
+
+Black and white can be replaced from the *Colors* menu: by one of the pairs offered (navy / yellow, dark green / light green, purple / pink), or by your own colors, picked in the standard Windows color dialog (*Over light backgrounds…* and *Over dark backgrounds…*).
+
+- **The body takes the color, the outline keeps the opposite one**: white around the color shown over light backgrounds, black around the one shown over dark backgrounds. Colored parts, like the red of *unavailable*, are kept.
+- **The switching thresholds follow the colors**: they sit at the midpoint between the luminance of the two colors, 22.5 on either side. Black and white give 150 and 105, as above.
+- **Guard rail**: one color must be dark and the other light, at least 150 luminance points apart (out of 255). Just before switching, the pointer then still differs from the background by at least 52 points. A color too close to the other one is refused, with a message, and nothing changes.
+- **Shake color**: red, unless one of your two colors looks like it; then magenta, orange or blue, whichever differs enough from both.
+- **Files**: colored pointers are 32-bit files, 17 per color; changing colors rewrites them in about 40 ms, and the new colors are on screen about 0.1 s after the click. Back to black and white, Windows' own files are used again and the duplicates are deleted. With an enlarged pointer, the vector drawings are tinted the same way.
+- The notification area icon takes the two colors.
+
+The color dialog is Windows' own (`comdlg32.dll`), loaded only while it is open; it opens centered on the mouse, and AutoCurseur keeps working meanwhile.
 
 ## Several screens
 
@@ -107,7 +122,7 @@ Measured by the performance and system tests, on a laptop with a 250 % display:
 
 | | |
 |---|---|
-| Executable | about 98 KB in ReleaseFast |
+| Executable | about 106 KB in ReleaseFast |
 | Private memory | about 2 MB |
 | Files written once | 34 classic cursors, about 4 MB, checked in about 13 ms at startup; with an enlarged pointer, 51 vector cursors (5 MB) drawn in about 0.3 s |
 | CPU, mouse still | about 0.15 % of one core |
@@ -115,6 +130,7 @@ Measured by the performance and system tests, on a laptop with a 250 % display:
 | One screen read | about 0.3 ms of CPU |
 | Black ↔ white change (only the pointer on screen, read from its file) | about 0.8 ms (about 10 ms with the largest pointer) |
 | Recoloring a pointer shape that appears (link hand…) | under 1 ms after Windows' notification |
+| Changing the two colors (51 files rewritten) | about 40 ms |
 | 2 s of shaking (screen reads included) | about 20 to 40 ms of CPU |
 | Longest wait for an answer from AutoCurseur while the mouse moves | under 16 ms (screen reads on a separate thread) |
 
@@ -136,9 +152,9 @@ The executable is written to `zig-out\bin\AutoCurseur.exe`, compiled in **Releas
 zig build test
 ```
 
-This runs 147 tests without touching your session's pointer:
+This runs 170 tests without touching your session's pointer:
 
-- **unit** (`src/*.zig`): decision and hysteresis, luminance, inversion of color and monochrome pixels, red tint, shake detection (real shakes, overshoot corrections, brisk but short or slow back-and-forths, a short swing breaking the series, millisecond counter wrap-around), geometry of the area read, sizes, timer pacing (reads-per-second budgets), texts in both languages, menu identifiers, icon, no allocation and static memory budget;
+- **unit** (`src/*.zig`): decision and hysteresis, luminance, inversion of color and monochrome pixels, tint in any color (red included), switching thresholds derived from the two colors, guard rail on the colors, shake color, shake detection (real shakes, overshoot corrections, brisk but short or slow back-and-forths, a short swing breaking the series, millisecond counter wrap-around), geometry of the area read, sizes, timer pacing (reads-per-second budgets), texts in both languages, menu identifiers, icon, no allocation and static memory budget;
   - `.cur` files (`src/curfile.zig`): reading, rejecting PNG, compressed or truncated images, inverted and red versions, double inversion giving back the original, 4-byte alignment, buffer too small, single-image 1-bit and 32-bit files;
   - vector cursors (`src/svgcur.zig`): color substitution, 1-bit conversion (any touched pixel visible), unpremultiplied colors, hotspots;
 - **integration** (`tests/integration.zig`):
@@ -147,6 +163,7 @@ This runs 147 tests without touching your session's pointer:
   - the written files: every size from 32 to 128 px kept, written once, not rewritten when up to date, rewritten when damaged;
   - red set: every cursor twice as large, the arrow identical to the black one with only its black pixels turned red (soft edges included), an outline with no gap;
   - files left by an earlier version deleted when the new ones are written;
+  - chosen colors, in a temporary folder: both sets made with the body in the chosen color and the opposite outline, same shape and hotspot, colored parts kept; a single color changed (the other set keeps Windows' files); back to black and white (Windows' files used again, duplicates deleted); shake color changing when red is too close to a chosen color; vector cursors tinted in 32 bits with the same visible pixels;
   - no leaked Windows objects after 20 reloads;
   - recognizing the displayed pointer: each of the 17 system cursors by its handle, never a cursor loaded by a program;
   - the screen reading thread: answers a request, keeps only the latest of 50 requests in a row, stops cleanly, reads on the spot once stopped;
@@ -159,11 +176,12 @@ This runs 147 tests without touching your session's pointer:
 zig build test-system
 ```
 
-These 18 system tests really change the pointer for about a minute, move the mouse, then restore everything. Quit AutoCurseur before running them (`zig build check-system` only compiles them). They check:
+These 21 system tests really change the pointer for about two minutes, move the mouse, then restore everything. Quit AutoCurseur before running them (`zig build check-system` only compiles them). They check:
 
 - applying then restoring the cursors, and their size;
 - cursors of another size left by an earlier run, which must not be reused;
 - the reads-per-second, language and shake settings sent through the menu, then saved; your registry settings are put back afterwards;
+- colors: a pair chosen in the menu is applied at once, saved, and used again at the next launch; a custom color typed into the Windows color dialog (opened centered on the mouse, AutoCurseur still answering) is applied, or refused with a message when too close to the other one; cancelling changes nothing; quitting while the dialog is open closes everything; saved colors are read back, an invalid pair is ignored;
 - 200 switches in a row;
 - on a test window (light or dark background, arrow or link hand, always on top): only the pointer on screen changes color, each other shape when it appears, none stays red after a shake; changing the displayed pointer only stays fast even with an enlarged pointer; with the real executable, a hand that appears is recolored in under 100 ms while the hidden arrow waits its turn;
 - with screens at different display scaling: on each screen, the pointer Windows actually displays (captured with the desktop duplication API by `tests/tools/ptrcap.c`) has the size Windows gives its own cursors there, and is pixel for pixel the image of that size from our files, for the black, white and red sets; skipped with a single scaling;
@@ -175,7 +193,7 @@ These 18 system tests really change the pointer for about a minute, move the mou
 
 ## Continuous integration
 
-On every push and pull request, [GitHub Actions](.github/workflows/ci.yml) installs Zig on a Windows machine. It runs `zig build test` and `zig build test-system`, builds the exe in ReleaseFast and makes it available as an artifact.
+On every push and pull request, [GitHub Actions](.github/workflows/ci.yml) installs Zig on a Windows machine. It runs `zig build test` and `zig build test-system`, builds the exe in ReleaseFast and makes it available as an artifact. That machine displays no pointer: the system tests that need to see the displayed cursor are skipped there, the others run.
 
 To publish a version, push a `v*` tag (for example `git tag v0.1.0` then `git push origin v0.1.0`). Once the tests pass, the pipeline creates the GitHub release with the tested exe, then submits the new version to winget (see [packaging/winget](packaging/winget/README.md)).
 
@@ -189,6 +207,7 @@ src/svgcur.zig    vector cursors drawn with Direct2D, like Windows 11 for an enl
 src/sampler.zig   reading the screen under the mouse, on a separate thread
 src/icon.zig      notification area icon
 src/i18n.zig      menu texts in English and French
+src/colorpick.zig Windows color dialog for custom colors, loaded on demand
 src/settings.zig  saved settings (HKCU\Software\AutoCurseur)
 src/main.zig      hidden window, menu, timers: ties everything together
 src/win32.zig     declarations of the Windows API functions used
@@ -202,10 +221,12 @@ packaging/winget/ winget manifests
 
 | Where | Name | Default | Role |
 |---|---|---|---|
-| `core.zig` | `Thresholds.to_black` | 150 | luminance from which the pointer turns black |
+| `core.zig` | `Thresholds.to_black` | 150 | luminance from which the pointer turns black (derived from the two colors: `thresholdsFor`) |
 | `core.zig` | `Thresholds.to_white` | 105 | luminance below which it turns white again |
 | menu | checks per second | 10 | 3, 5, 10 or 20 while the mouse moves (`core.RATES`) |
 | menu | language | automatic | follows the Windows display language: French for any French variant, English otherwise |
+| menu | colors | black / white | a pair from `core.PRESETS`, or two custom colors, one dark and one light |
+| `core.zig` | `MIN_LUMA_GAP` | 150 | minimum luminance difference between the two colors |
 | menu | shake to find | on | bigger red pointer when the mouse is shaken |
 | `core.zig` | `SHAKE_TURNS`, `SHAKE_WINDOW_MS` | 5, 1000 | consecutive wide reversals needed, and the time they must fit in |
 | `core.zig` | `SHAKE_SEG_FACTOR` | 3 | minimum swing, in pointer sizes |
@@ -214,7 +235,7 @@ packaging/winget/ winget manifests
 | `core.zig` | `IDLE_MS` | 250 | period in slow mode (never more often than while moving) |
 | `core.zig` | `MAX_CUR` | 256 | maximum cursor size, which sizes the static buffers |
 
-The menu choices are stored as `DWORD` values in `HKCU\Software\AutoCurseur`: `LecturesParSeconde`, `Langue` (0 automatic, 1 English, 2 French) and `SecouerPourRetrouver` (0 or 1).
+The menu choices are stored as `DWORD` values in `HKCU\Software\AutoCurseur`: `LecturesParSeconde`, `Langue` (0 automatic, 1 English, 2 French), `SecouerPourRetrouver` (0 or 1), and the two colors as `0xRRGGBB`: `CouleurSurFondClair` (shown over light backgrounds) and `CouleurSurFondSombre`.
 
 ## Limitations
 
